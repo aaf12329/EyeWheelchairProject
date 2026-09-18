@@ -1,0 +1,8 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 数据与模型（视情况忽略）
+data/raw_videos/
+data/snapshots/
+models/*.task

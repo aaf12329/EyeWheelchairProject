@@ -82,6 +82,14 @@ KEY_DEBOUNCE_SECONDS = 0.25 # 两次按键响应的最小间隔：按住不放�
 MESSAGE_INITIAL = "请睁眼正视摄像头，正在校准"
 MESSAGE_RECALIBRATE = "重新校准：请睁眼正视摄像头"
 
+WELCOME_ART = (
+    "/\\     /\\\\",
+    "{  `---'  }",
+    "{  O   O  }",
+    "~~>  V  <~~",
+    "\\\\  \\|/  /",
+    "`-----'__",
+)
 
 #path写法（里面全是路径）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -494,6 +502,9 @@ def pressed_key(now: float, key_available_at: float):
 
 
 def main() -> None:
+
+    for i in WELCOME_ART:
+        print(i)
     """程序入口：先建好四样东西，然后每帧走一遍 看→量→判→报→控。"""
     # ==================== 启动阶段（下面每个调用只执行一次）====================
     cap = open_camera()  # ① 打开摄像头

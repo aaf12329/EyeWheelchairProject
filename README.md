@@ -2,7 +2,7 @@ README有中文版本和英文版本，内容一样中文版本在上面英文�
 The README has a Chinese version and an English version with the same content. The Chinese version is above; please scroll down for the English version.
 
 
-README(CH)中文版本README
+## 中文版（Chinese）
 
 # EyeWheelchairProject（眼控轮椅原型）
 
@@ -49,6 +49,25 @@ EyeWheelchairProject/
 
 五个脚本**互不 import**，各自独立可运行（按周推进的开发顺序保留下来，方便逐步验证）。
 
+## 代码组织
+
+每个脚本内部统一分三段，用注释横幅隔开：
+
+1. **判定逻辑**：只吃关键点或数字，不碰摄像头、不画图 —— 可以脱离硬件单独测试
+2. **摄像头与画面**：打开设备、构建识别器、绘制文字与图形
+3. **主流程 `main()`**：读帧 → 更新状态 → 画 → 按键
+
+另外：
+
+- 每个文件**开头的注释是一张调用关系图**（谁调用谁、哪些每帧调用、哪些只执行一次），
+  每个函数的文档串里写明"被谁调用、内部调用谁"，可以按图读代码。
+- 状态机（第 3 步的眨眼计数、第 4 步的方向选择、第 5 步的"选方向 + 眨眼确认"）
+  各自封装成一个类，状态存在对象里，对外只暴露 `update(now, ...)` 与 `reset(now)`。
+- 这样组织的目的：**阈值与判定逻辑能脱离摄像头被自动测试** —— 改动前后各跑一次 `pytest`，
+  就知道有没有破坏原有行为，不必开摄像头靠肉眼验证。
+- 第 2、3、4、5 步四个脚本已按这套办法整理完毕；`camera_preview.py` 是另一版重构，
+  尚未按这套整理，详见"已知问题"第 2 条。
+
 ## 环境准备
 
 需要 Python 3.10 以上（开发环境是 3.13 / 3.14）。
@@ -94,38 +113,56 @@ venv\Scripts\python.exe -m pytest -q
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| 第 1 周 | 摄像头基线（预览 / 录像 / 截图） | ✅ |
-| 第 2 周 | MediaPipe 人脸与手部关键点可视化 | ✅ |
-| 第 3 步 | 眨眼校准与计数（重构 + 单元测试） | ✅ |
-| 第 4 步 | 视线方向选择（左 / 中 / 右） | ✅ |
-| 第 5 步 | 视线选方向 + 眨眼确认（屏幕演示） | ✅ |
+| 第 1 周 | 摄像头基线（预览 / 录像 / 截图） | ⚠️ 重构版待实机完整验证 |
+| 第 2 周 | MediaPipe 人脸与手部关键点可视化 | ✅ 已重构（初步测试通过） |
+| 第 3 步 | 眨眼校准与计数（重构 + 单元测试） | ✅ 已实测通过 |
+| 第 4 步 | 视线方向选择（左 / 中 / 右） | ✅ 已重构（初步测试通过） |
+| 第 5 步 | 视线选方向 + 眨眼确认（屏幕演示） | ✅ 已重构（初步测试通过） |
+| 代码整理 | 四个脚本统一为三段式结构 + 调用关系注释，判定逻辑可单测 | ✅ |
 | 下一步 | 串口输出（Arduino / 电机驱动） | ⬜ 未开始，需先确定指令协议与急停方案 |
 
 ## 已知问题与注意事项
 
-1. **退出卡顿（重要）**：MediaPipe 1.0.1 在 Windows 上销毁识别器要卡约 42 秒。
-   `blink_preview.py` 已处理（保活引用 + 不调用 `close()`，退出不到 1 秒），
-   **其余 4 个脚本尚未处理**，按 Q 之后进程会僵约 42 秒才真正结束。
-2. **依赖未锁版本**：`requirements.md` 里没有写版本号，换机器或升级可能踩到 API 变化。
+1. **退出行为（五个脚本已统一处理）**：MediaPipe 1.0.1 在 Windows 上销毁识别器要卡约 42 秒（实测）。
+   涉及 MediaPipe 的四个脚本现在都不再调用 `close()`，改为在检测器构建函数里保留一个长期引用（保活），
+   让进程退出时由系统一次性回收 —— 按 Q 或点窗口 ✕ 之后**1 秒内**结束。
+   `camera_preview.py` 不使用 MediaPipe，本来就没有这个问题。
+2. **`camera_preview.py` 尚未实机完整验证**：它由另一版重构完成（不是本次统一套路），
+   使用前请先跑一遍预览 / 录像 / 截图，确认与旧版行为一致。
+3. **依赖未锁版本**：`requirements.md` 里没有写版本号，换机器或升级可能踩到 API 变化。
    当前开发环境实测为 mediapipe 1.0.1 + opencv 5.0.0，交付前建议锁定版本。
-3. **左右镜像约定**：交互类脚本对画面做了水平镜像（`cv2.flip`），让屏幕里的"左/右"与使用者的体感一致；
+4. **左右镜像约定**：交互类脚本对画面做了水平镜像（`cv2.flip`），让屏幕里的"左/右"与使用者的体感一致；
    `camera_preview.py` 不做镜像，所以它录下来的视频是"对面看你"的视角，与截图视角相反。
-   如果实机上发现左右判断相反，按 `I` 反转；两个脚本的命令行参数或阈值符号是排查的第二处。
-4. **窗口标题**：Windows 版 OpenCV 对中文窗口标题支持不好（会显示成乱码），
-   `blink_preview.py` 已改成英文标题，窗口内的中文由 PIL + 系统字体渲染，不受影响。
-5. **中文字体依赖**：脚本按 `msyh.ttc → simhei.ttf → arial.ttf` 顺序探测系统字体，都没有才会报错。
-6. `data/raw_videos/` 里 2026-09-16 的录像文件都是 0 字节空壳（当时录屏未写入成功），已从版本库中删除。
+   如果实机上发现左右判断相反，按 `I` 反转。
+5. **窗口标题**：Windows 版 OpenCV 对中文窗口标题支持不好（会显示成乱码），
+   所以五个脚本的窗口标题一律用英文；窗口内的中文状态文字由 PIL + 系统字体渲染，不受影响。
+6. **中文字体依赖**：三个需要显示中文的交互脚本按 `msyh.ttc → simhei.ttf → arial.ttf` 顺序探测系统字体，
+   并缓存已加载的字体（不再每帧重复读文件）；三者都不存在才会报错。
+   `camera_preview.py` 与 `landmarks_preview.py` 只用英文，不依赖中文字体。
+7. `data/raw_videos/` 里 2026-09-16 的录像文件都是 0 字节空壳（当时录屏未写入成功），已从版本库中删除。
+
+### 有意保留的行为边界
+
+下面三条是系统当前的真实行为边界，属于"已知、暂时不动"——改动它们需要单独评估
+（本次重构的验收标准是"行为不变"，所以一处都没有调）：
+
+- 一直盯着屏幕正中间**不会**产生候选：候选的计时只在**方向发生变化**时开始，而初始方向本来就是"中"。
+- 进入"等待眨眼"后把视线移开**不会取消**已选中的方向，必须眨一次眼（或人脸丢失）才能退出该状态。
+- 在 30fps 下，只闭 1 帧也会被 3 帧平滑拉长成约 0.10 秒的闭眼，因此可能被计为一次眨眼
+  （`MIN_CLOSED_SECONDS = 0.04` 实际不触发，真正抗噪的是平滑本身）。
 
 ## 后续计划
 
-1. 把 `gaze_direction_preview.py` 与 `gaze_blink_confirm_demo.py` 按 `blink_preview.py` 同样的办法收拾一遍
-   （同文件内拆出可测试的判定类、补测试、修退出卡顿与按键去抖）。
-2. 抽公共部分（打开摄像头、中文绘制、检测器构建），减少各脚本之间的复制粘贴。
-3. 接串口控制前先定三件事：**指令协议**（左转/前进/右转/停的编码）、**急停**（任何异常或超时立即停）、
+1. **实机完整验证 `camera_preview.py`**：重构版还没完整跑过，用之前先测预览 / 录像 / 截图三项。
+2. **补常驻测试**：目前 `tests/` 只覆盖第 3 步（眨眼）与一个加载真实模型的冒烟测试；
+   第 4、5 步的行为验证目前是一次性脚本，还没落成常驻用例。
+3. **抽公共部分**：打开摄像头、构建检测器、中文绘制在五个脚本里各有一份拷贝，改一处要同步五处，
+   是下一个该消除的重复。
+4. 接串口控制前先定三件事：**指令协议**（左转/前进/右转/停的编码）、**急停**（任何异常或超时立即停）、
    **输出层与控制层分离**（识别只产出意图，发送动作单独一层，便于测试和回放）。
 
 
-README(EN):
+## English Version
 # EyeWheelchairProject (Eye-Controlled Wheelchair Prototype)
 
 Eye-controlled wheelchair prototype — gaze + blink interaction, vision-only stage (no hardware control yet).
@@ -167,6 +204,21 @@ EyeWheelchairProject/
 ```
 
 The five scripts **do not import each other** and can each run independently (the weekly development order is preserved for gradual verification).
+
+## Code Organization
+
+Each script is internally split into three sections separated by comment banners:
+
+1. **Decision logic**: takes only landmarks or numbers — no camera, no drawing. It can be tested without any hardware.
+2. **Camera and rendering**: opening the device, constructing the detectors, drawing text and shapes.
+3. **Main flow `main()`**: read a frame → update state → draw → handle keys.
+
+Also:
+
+- The comment at the **top of each file is a call graph** (who calls whom, which calls happen every frame, which happen only once), and every function's docstring states "who calls me / whom I call" — you can read the code along that map.
+- Each state machine (blink counting in step 3, direction selection in step 4, "select + blink to confirm" in step 5) is wrapped in a class: the state lives on the object, and only `update(now, ...)` and `reset(now)` are exposed.
+- The purpose of this layout: **thresholds and decision logic can be tested without a camera** — run `pytest` before and after a change and you know whether existing behaviour broke, instead of opening the camera and verifying by eye.
+- Steps 2, 3, 4 and 5 have been reorganised this way; `camera_preview.py` is a separate refactor that has not been reorganised — see Known Issues item 2.
 
 ## Environment Setup
 
@@ -212,24 +264,35 @@ Habit when changing code: **run `pytest` once before and after each change**. It
 
 | Stage | Content | Status |
 |---|---|---|
-| Week 1 | Camera baseline (preview / record / snapshot) | ✅ |
-| Week 2 | MediaPipe face and hand landmark visualization | ✅ |
-| Step 3 | Blink calibration and counting (refactor + unit tests) | ✅ |
-| Step 4 | Gaze direction selection (left / center / right) | ✅ |
-| Step 5 | Gaze selects direction + blink confirmation (screen demo) | ✅ |
+| Week 1 | Camera baseline (preview / record / snapshot) | ⚠️ Refactored version awaits full on-device verification |
+| Week 2 | MediaPipe face and hand landmark visualization | ✅ Refactored (preliminary tests pass) |
+| Step 3 | Blink calibration and counting (refactor + unit tests) | ✅ Verified on the real device |
+| Step 4 | Gaze direction selection (left / center / right) | ✅ Refactored (preliminary tests pass) |
+| Step 5 | Gaze selects direction + blink confirmation (screen demo) | ✅ Refactored (preliminary tests pass) |
+| Code tidy-up | Four scripts unified into the three-section layout with call-graph comments; decision logic unit-testable | ✅ |
 | Next | Serial output (Arduino / motor driver) | ⬜ Not started; command protocol and emergency stop must be defined first |
 
 ## Known Issues and Notes
 
-1. **Exit lag (important)**: MediaPipe 1.0.1 takes about 42 seconds to destroy the recognizer on Windows. `blink_preview.py` has already handled this (keep-alive reference + do not call `close()`, exits in under 1 second); **the other 4 scripts are not yet handled**, and the process will hang for about 42 seconds after pressing Q before actually ending.
-2. **Dependencies not version-locked**: `requirements.md` does not specify version numbers; moving to another machine or upgrading may hit API changes. The current development environment is tested with mediapipe 1.0.1 + opencv 5.0.0; it is recommended to lock versions before delivery.
-3. **Left-right mirror convention**: Interaction scripts horizontally mirror the image (`cv2.flip`) so that "left/right" on the screen matches the user's physical sense; `camera_preview.py` does not mirror, so the video it records is from the "opposite person looking at you" perspective, opposite to the snapshot perspective. If left/right judgment is found to be reversed on the real device, press `I` to invert; the command-line arguments or threshold signs of the two scripts are the second place to check.
-4. **Window title**: Windows OpenCV does not support Chinese window titles well (they show as garbled text). `blink_preview.py` has been changed to an English title; Chinese inside the window is rendered by PIL + system fonts and is not affected.
-5. **Chinese font dependency**: Scripts probe system fonts in the order `msyh.ttc → simhei.ttf → arial.ttf`; only if none are found will an error be reported.
-6. The 2026-09-16 recording files in `data/raw_videos/` are all 0-byte empty shells (screen recording did not write successfully at the time) and have been deleted from the version library.
+1. **Exit behaviour (handled in all five scripts)**: MediaPipe 1.0.1 takes about 42 seconds to destroy a recognizer on Windows (measured). The four MediaPipe-based scripts no longer call `close()`; instead the detector factory keeps a long-lived reference (keep-alive), so everything is reclaimed by the system at exit — pressing Q or clicking the window ✕ now ends the process **within 1 second**. `camera_preview.py` does not use MediaPipe and never had this problem.
+2. **`camera_preview.py` is not fully verified on the real machine**: it was refactored in a separate pass (not the unified pattern). Run preview / record / snapshot once before relying on it, and confirm the behaviour matches the old version.
+3. **Dependencies are not version-locked**: `requirements.md` lists no version numbers, so another machine or an upgrade may hit API changes. The development environment measures mediapipe 1.0.1 + opencv 5.0.0; lock the versions before delivery.
+4. **Left-right mirror convention**: interaction scripts mirror the image horizontally (`cv2.flip`) so that "left/right" on the screen matches the user's felt left/right; `camera_preview.py` does not mirror, so recorded video is from the "person facing you" perspective — the opposite of the snapshots. If left/right turns out reversed on the real device, press `I` to invert.
+5. **Window title**: Windows OpenCV renders Chinese window titles badly (garbled text), so all five scripts use English titles; Chinese text inside the window is drawn by PIL + system fonts and is unaffected.
+6. **Chinese font dependency**: the three interaction scripts that display Chinese probe system fonts in the order `msyh.ttc → simhei.ttf → arial.ttf` and cache the loaded font (no more re-reading the file every frame); an error is raised only if none of the three exists. `camera_preview.py` and `landmarks_preview.py` use English only and do not depend on fonts.
+7. The 2026-09-16 recording files in `data/raw_videos/` are all 0-byte empty shells (the recording never wrote any data) and have been deleted from the repository.
+
+### Behaviour boundaries we intentionally keep
+
+These three are the current, real boundaries of the system and are "known, deliberately untouched" — changing any of them needs a separate decision (the acceptance bar for this refactor was *behaviour unchanged*, so nothing was tuned):
+
+- Staring at the exact centre of the screen **never** produces a candidate: the stability timer starts only when the direction **changes**, and the initial direction is already "centre".
+- After entering "waiting for blink", looking away does **not** cancel the selected direction — only a blink (or losing the face) leaves that state.
+- At 30 fps a single closed frame is stretched by the 3-frame smoothing into a ~0.10 s closure and can therefore count as a blink (`MIN_CLOSED_SECONDS = 0.04` effectively never fires; the smoothing itself is what filters noise).
 
 ## Future Plans
 
-1. Clean up `gaze_direction_preview.py` and `gaze_blink_confirm_demo.py` in the same way as `blink_preview.py` (extract testable decision classes within the same file, add tests, fix exit lag and key debouncing).
-2. Extract common parts (opening camera, Chinese drawing, detector construction) to reduce copy-paste between scripts.
-3. Before connecting serial control, define three things first: **command protocol** (encoding for left turn / forward / right turn / stop), **emergency stop** (stop immediately on any exception or timeout), and **separation of output layer and control layer** (recognition only produces intent; sending actions is a separate layer for easier testing and playback).
+1. **Fully verify `camera_preview.py` on the real machine**: the refactored version has never been run end to end — test preview / record / snapshot first.
+2. **Add permanent tests**: `tests/` currently covers step 3 (blink) plus one smoke test that loads the real model; the step 4 and 5 behaviour checks are still one-off scripts.
+3. **Extract the common parts**: opening the camera, building detectors and drawing Chinese text are copied in all five scripts, so one change means five edits — the next duplication to remove.
+4. Before connecting serial control, define three things first: **command protocol** (encoding for left turn / forward / right turn / stop), **emergency stop** (stop immediately on any exception or timeout), and **separation of output layer and control layer** (recognition only produces intent; sending actions is a separate layer for easier testing and playback).

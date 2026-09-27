@@ -6,3 +6,6 @@ __pycache__/
 data/raw_videos/
 data/snapshots/
 models/*.task
+
+# 硬件照片（体积大，不入库；硬件信息记录在 README 的"硬件与固件"一节）
+Related_materials/IMG_*.jpg

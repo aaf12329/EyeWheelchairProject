@@ -41,6 +41,9 @@ EyeWheelchairProject/
 │     ├─ gaze_direction_preview.py    第 4 步：视线方向选择（左 / 中 / 右）
 │     └─ gaze_blink_confirm_demo.py   第 5 步：视线选方向 + 眨眼确认（完整演示）
 ├─ tests/                             pytest：眨眼判定行为测试 + 无摄像头冒烟测试
+├─ firmware/
+│  └─ wheelchair_controller.ino       Arduino 修订版固件（含台架验证清单，待实机验证）
+├─ Related_materials/                 硬件照片、参考固件（ardino_demo.ino）等资料
 ├─ models/                            MediaPipe 模型文件（face / hand landmarker，已入库）
 ├─ data/                              录制素材（raw_videos / snapshots）
 ├─ requirements.md                    依赖清单
@@ -109,6 +112,48 @@ venv\Scripts\python.exe -m pytest -q
 
 改代码的习惯：**改动前后各跑一次 `pytest`**。它会把"这次改动有没有破坏原有行为"直接告诉你，不用开摄像头靠肉眼验证。
 
+## 硬件与固件
+
+视觉端（Python）之外，下位机方案已经成型：
+
+| 部件 | 说明 |
+|---|---|
+| 主控 | Arduino Uno 兼容板（ATmega328P-AU，16MHz，5V 逻辑） |
+| 电机驱动 | BTS7960 大电流双 H 桥模块（带散热片） |
+| 电机 | 12-24V 直流电机 ×2（左右轮差速转向） |
+| 电压传感器 | 0-25V 分压模块 → A0（监测电池） |
+| 供电 | 锂电池组（满电约 25V）；电机电源直接取自电池，**不经过** Uno 的 5V 稳压 |
+
+```
+PC（Python + pyserial，9600 波特）──串口指令──▶ ATmega328P ──INA/INB/PWM──▶ BTS7960 ×2 ──▶ 左右电机
+电池 ──▶ 0-25V 电压传感器（1:5 分压）──▶ A0
+```
+
+### 串口指令协议（由固件定义，Python 端照此实现）
+
+| 指令 | 动作 |
+|---|---|
+| `0` / `S` | 停止 |
+| `1` / `F` | 前进 |
+| `2` / `B` | 后退 |
+| `L` / `R` | 原地左转 / 右转 |
+| `3` / `4` | 左半速 / 右半速前进（弧线行驶） |
+| `GET_DATA` | 回报 `BATTERY:百分比,电压×10`（如 `BATTERY:87,218` = 87%、21.8V） |
+
+固件内置四层安全机制：**3 秒收不到指令自动急停**（因此 Python 端必须周期性重发当前指令当心跳）、
+换向/转向**先减速停稳再执行**、低电（≤19.0V）**只允许停止指令**（回升到 19.5V 才解锁）、
+**看门狗**（程序卡死 2 秒自动复位停机）。
+
+固件文件两个：
+
+- `Related_materials/ardino_demo.ino` —— **参考件**，原样保留；
+- `firmware/wheelchair_controller.ino` —— **修订版**：看门狗、串口 char 缓冲、转向先停、
+  PWM 频率修正（约 18kHz）、电池平均+迟滞、低电限流等，每处改动带【修订】标记，
+  文件底部有 **7 条台架验证清单**（接线核对、噪音/温度、看门狗、长跑、转向先停、低电模拟、电压对表）。
+
+> ⚠️ 烧录前需在 Arduino IDE 安装 **TimerOne** 库；台架清单全部通过**且加装物理急停按钮**（直接切断
+> 电机电源）之后，才允许载人测试。
+
 ## 进度
 
 | 阶段 | 内容 | 状态 |
@@ -119,7 +164,8 @@ venv\Scripts\python.exe -m pytest -q
 | 第 4 步 | 视线方向选择（左 / 中 / 右） | ✅ 已重构（初步测试通过） |
 | 第 5 步 | 视线选方向 + 眨眼确认（屏幕演示） | ✅ 已重构（初步测试通过） |
 | 代码整理 | 四个脚本统一为三段式结构 + 调用关系注释，判定逻辑可单测 | ✅ |
-| 下一步 | 串口输出（Arduino / 电机驱动） | ⬜ 未开始，需先确定指令协议与急停方案 |
+| 固件 | Arduino 控制器安全修订版（看门狗/char 缓冲/转向先停/PWM 频率），含台架清单 | 🔶 已写好，待台架验证 |
+| 下一步 | Python 串口输出层（心跳重发 + GET_DATA + 低电处理） | ⬜ 未开始 |
 
 ## 已知问题与注意事项
 
@@ -158,8 +204,12 @@ venv\Scripts\python.exe -m pytest -q
    第 4、5 步的行为验证目前是一次性脚本，还没落成常驻用例。
 3. **抽公共部分**：打开摄像头、构建检测器、中文绘制在五个脚本里各有一份拷贝，改一处要同步五处，
    是下一个该消除的重复。
-4. 接串口控制前先定三件事：**指令协议**（左转/前进/右转/停的编码）、**急停**（任何异常或超时立即停）、
-   **输出层与控制层分离**（识别只产出意图，发送动作单独一层，便于测试和回放）。
+4. **台架验证 `firmware/wheelchair_controller.ino`**：按文件底部 7 条清单逐项过
+   （接线核对 → PWM 噪音/温度 → 看门狗 → 长跑 → 转向先停 → 低电模拟 → 电压对表），
+   全过后加装物理急停按钮。
+5. **写 Python 串口输出层**：按"硬件与固件"一节的协议表实现——当前指令每 ≤1 秒重发一次（心跳，
+   配合固件 3 秒超时），定期发 `GET_DATA` 收电池电压，低电时只发 `S`；识别层只产出意图，
+   发送动作单独一层。
 
 
 ## English Version
@@ -197,6 +247,9 @@ EyeWheelchairProject/
 │     ├─ gaze_direction_preview.py    Step 4: Gaze direction selection (left / center / right)
 │     └─ gaze_blink_confirm_demo.py   Step 5: Gaze selects direction + blink confirmation (full demo)
 ├─ tests/                             pytest: blink decision behavior tests + no-camera smoke tests
+├─ firmware/
+│  └─ wheelchair_controller.ino       Revised Arduino firmware (with bench checklist, pending verification)
+├─ Related_materials/                 Hardware photos, reference firmware (ardino_demo.ino), etc.
 ├─ models/                            MediaPipe model files (face / hand landmarker, checked in)
 ├─ data/                              Recorded materials (raw_videos / snapshots)
 ├─ requirements.md                    Dependency list
@@ -260,6 +313,43 @@ Runs in about 1 second, covering blink calibration, normal counting, too-short/t
 
 Habit when changing code: **run `pytest` once before and after each change**. It will directly tell you "whether this change broke existing behavior," without needing to open the camera and verify by eye.
 
+## Hardware and Firmware
+
+Beyond the vision side (Python), the low-level controller design is now in place:
+
+| Part | Notes |
+|---|---|
+| MCU | Arduino Uno compatible board (ATmega328P-AU, 16 MHz, 5 V logic) |
+| Motor driver | BTS7960 high-current dual H-bridge module (with heatsinks) |
+| Motors | 12–24 V DC motors ×2 (differential steering) |
+| Voltage sensor | 0–25 V divider module → A0 (battery monitoring) |
+| Power | Li-ion pack (~25 V full); motor power comes straight from the battery, **not** through the Uno's 5 V regulator |
+
+```
+PC (Python + pyserial, 9600 baud) ──commands──▶ ATmega328P ──INA/INB/PWM──▶ BTS7960 ×2 ──▶ left/right motors
+Battery ──▶ 0–25 V voltage sensor (1:5 divider) ──▶ A0
+```
+
+### Serial command protocol (defined by the firmware; implement the Python side to match)
+
+| Command | Action |
+|---|---|
+| `0` / `S` | Stop |
+| `1` / `F` | Forward |
+| `2` / `B` | Backward |
+| `L` / `R` | Pivot turn left / right |
+| `3` / `4` | Half-speed left / right (arc driving) |
+| `GET_DATA` | Replies `BATTERY:percent,voltage×10` (e.g. `BATTERY:87,218` = 87%, 21.8 V) |
+
+The firmware has four built-in safety layers: **auto-stop after 3 s without a command** (so the Python side must periodically re-send the current command as a heartbeat), turns and direction changes **ramp to a full stop before executing**, low battery (≤19.0 V) **only accepts stop commands** (unlocks at 19.5 V), and a **watchdog** (a hung program resets within 2 s and stops the motors).
+
+Two firmware files:
+
+- `Related_materials/ardino_demo.ino` — **reference copy**, kept untouched;
+- `firmware/wheelchair_controller.ino` — **revised version**: watchdog, serial char buffer, stop-before-turn, PWM frequency fix (~18 kHz), battery averaging + hysteresis, throttled low-battery warnings, etc. Every change carries a 【修订】 marker, and the file ends with a **7-item bench verification checklist** (wiring check, noise/temperature, watchdog, long run, stop-before-turn, low-battery simulation, voltage cross-check).
+
+> ⚠️ Install the **TimerOne** library in the Arduino IDE before compiling. The bench checklist must fully pass **and a physical e-stop button** (cutting motor power directly) must be added before any human ride testing.
+
 ## Progress
 
 | Stage | Content | Status |
@@ -270,7 +360,8 @@ Habit when changing code: **run `pytest` once before and after each change**. It
 | Step 4 | Gaze direction selection (left / center / right) | ✅ Refactored (preliminary tests pass) |
 | Step 5 | Gaze selects direction + blink confirmation (screen demo) | ✅ Refactored (preliminary tests pass) |
 | Code tidy-up | Four scripts unified into the three-section layout with call-graph comments; decision logic unit-testable | ✅ |
-| Next | Serial output (Arduino / motor driver) | ⬜ Not started; command protocol and emergency stop must be defined first |
+| Firmware | Safety-revised Arduino controller (watchdog / char buffer / stop-before-turn / PWM frequency), with bench checklist | 🔶 Written, awaiting bench verification |
+| Next | Python serial output layer (heartbeat re-send + GET_DATA + low-battery handling) | ⬜ Not started |
 
 ## Known Issues and Notes
 
@@ -295,4 +386,5 @@ These three are the current, real boundaries of the system and are "known, delib
 1. **Fully verify `camera_preview.py` on the real machine**: the refactored version has never been run end to end — test preview / record / snapshot first.
 2. **Add permanent tests**: `tests/` currently covers step 3 (blink) plus one smoke test that loads the real model; the step 4 and 5 behaviour checks are still one-off scripts.
 3. **Extract the common parts**: opening the camera, building detectors and drawing Chinese text are copied in all five scripts, so one change means five edits — the next duplication to remove.
-4. Before connecting serial control, define three things first: **command protocol** (encoding for left turn / forward / right turn / stop), **emergency stop** (stop immediately on any exception or timeout), and **separation of output layer and control layer** (recognition only produces intent; sending actions is a separate layer for easier testing and playback).
+4. **Bench-verify `firmware/wheelchair_controller.ino`**: work through the 7-item checklist at the end of the file (wiring check → PWM noise/temperature → watchdog → long run → stop-before-turn → low-battery simulation → voltage cross-check); then add a physical e-stop button.
+5. **Write the Python serial output layer**: implement the protocol table in "Hardware and Firmware" — re-send the current command every ≤1 s (heartbeat, matching the firmware's 3 s timeout), poll `GET_DATA` for battery voltage, send only `S` when the battery is low; the recognition layer only produces intent, sending is a separate layer.

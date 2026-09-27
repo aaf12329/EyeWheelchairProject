@@ -6,12 +6,14 @@ The README has a Chinese version and an English version with the same content. T
 
 # EyeWheelchairProject（眼控轮椅原型）
 
-Eye-controlled wheelchair prototype — gaze + blink interaction, vision-only stage (no hardware control yet).
+Eye-controlled wheelchair prototype — gaze + blink interaction. Python side runs as a pure screen simulation by default; the Arduino firmware and serial layer are written but not yet verified on the real chair.
 
 用普通 USB 摄像头识别"眼睛在看哪个方向"和"有没有眨眼"，先把**眼控交互**这条路走通。
 
-> ⚠️ **当前阶段一切只输出到屏幕**：所有程序都不会向 Arduino、电机驱动板或轮椅发送任何指令，
-> 也不包含任何硬件控制代码。等识别链路的正确性能用测试和实测证明之后，才会考虑接串口。
+> ⚠️ **安全边界**：Python 端默认是**纯屏幕模拟**（`gaze_blink_confirm_demo.py` 顶部
+> `ENABLE_HARDWARE = False`），不向任何硬件发指令。Arduino 固件（`firmware/`）与串口输出层
+> （`src/hardware/`）已经写好，但**未台架验证、默认关闭**；台架清单全过且加装物理急停按钮之前，
+> 不进行任何载人测试。
 
 ---
 
@@ -39,8 +41,10 @@ EyeWheelchairProject/
 │  └─ interaction/
 │     ├─ blink_preview.py             第 3 步：眨眼校准与计数（已重构，含测试）
 │     ├─ gaze_direction_preview.py    第 4 步：视线方向选择（左 / 中 / 右）
-│     └─ gaze_blink_confirm_demo.py   第 5 步：视线选方向 + 眨眼确认（完整演示）
-├─ tests/                             pytest：眨眼判定行为测试 + 无摄像头冒烟测试
+│     └─ gaze_blink_confirm_demo.py   第 5 步：视线选方向 + 眨眼确认（界面美化版，接串口层）
+│  └─ hardware/
+│     └─ serial_link.py               串口输出层：意图→指令、心跳、电池、低电锁（默认模拟）
+├─ tests/                             pytest：眨眼判定 / 串口链路 / 界面渲染 + 模型冒烟测试
 ├─ firmware/
 │  └─ wheelchair_controller.ino       Arduino 修订版固件（含台架验证清单，待实机验证）
 ├─ Related_materials/                 硬件照片、参考固件（ardino_demo.ino）等资料
@@ -50,7 +54,8 @@ EyeWheelchairProject/
 └─ README.md
 ```
 
-五个脚本**互不 import**，各自独立可运行（按周推进的开发顺序保留下来，方便逐步验证）。
+五个演示脚本各自独立可运行（按周推进的开发顺序保留下来，方便逐步验证）。唯一的跨文件依赖是
+第 5 步 → `src/hardware/serial_link.py`（串口输出层），且默认以模拟模式运行。
 
 ## 代码组织
 
@@ -107,8 +112,9 @@ venv\Scripts\python.exe src\interaction\blink_preview.py
 venv\Scripts\python.exe -m pytest -q
 ```
 
-约 1 秒跑完，覆盖眨眼的校准、正常计数、过短/过长忽略、不应期、人脸丢失重置等行为，另有一个加载真实模型的冒烟测试。
-测试全部使用合成数据，**不需要摄像头**；`data/raw_videos` 里没有可用录像时会自动跳过视频那条。
+约 1 秒跑完，共 29 条：眨眼判定的校准 / 计数 / 过短过长忽略 / 不应期 / 人脸丢失重置，
+串口链路的意图翻译 / 心跳 / 电池解析 / 低电锁，界面渲染冒烟，外加一个加载真实模型的冒烟测试。
+全部使用合成数据，**不需要摄像头和硬件**；`data/raw_videos` 里没有可用录像时会自动跳过视频那条。
 
 改代码的习惯：**改动前后各跑一次 `pytest`**。它会把"这次改动有没有破坏原有行为"直接告诉你，不用开摄像头靠肉眼验证。
 
@@ -129,7 +135,7 @@ PC（Python + pyserial，9600 波特）──串口指令──▶ ATmega328P �
 电池 ──▶ 0-25V 电压传感器（1:5 分压）──▶ A0
 ```
 
-### 串口指令协议（由固件定义，Python 端照此实现）
+### 串口指令协议（由固件定义，Python 端 `serial_link.py` 已按此实现）
 
 | 指令 | 动作 |
 |---|---|
@@ -151,6 +157,12 @@ PC（Python + pyserial，9600 波特）──串口指令──▶ ATmega328P �
   PWM 频率修正（约 18kHz）、电池平均+迟滞、低电限流等，每处改动带【修订】标记，
   文件底部有 **7 条台架验证清单**（接线核对、噪音/温度、看门狗、长跑、转向先停、低电模拟、电压对表）。
 
+Python 端的串口输出层也已落地：`src/hardware/serial_link.py`
+（`WheelchairLink` 类：意图翻译成协议字母、当前指令每 1 秒心跳重发、每 2 秒 `GET_DATA`
+轮询电池、低电双重保险强制停车；`port=None` 时为**模拟模式**，无硬件也能跑全套测试）。
+`gaze_blink_confirm_demo.py` 已接入：默认 `ENABLE_HARDWARE = False` 纯屏幕模拟；
+改为 `True` 并填好串口号后，"确认成功"的方向才会真的发往固件。
+
 > ⚠️ 烧录前需在 Arduino IDE 安装 **TimerOne** 库；台架清单全部通过**且加装物理急停按钮**（直接切断
 > 电机电源）之后，才允许载人测试。
 
@@ -165,7 +177,8 @@ PC（Python + pyserial，9600 波特）──串口指令──▶ ATmega328P �
 | 第 5 步 | 视线选方向 + 眨眼确认（屏幕演示） | ✅ 已重构（初步测试通过） |
 | 代码整理 | 四个脚本统一为三段式结构 + 调用关系注释，判定逻辑可单测 | ✅ |
 | 固件 | Arduino 控制器安全修订版（看门狗/char 缓冲/转向先停/PWM 频率），含台架清单 | 🔶 已写好，待台架验证 |
-| 下一步 | Python 串口输出层（心跳重发 + GET_DATA + 低电处理） | ⬜ 未开始 |
+| 串口输出层 | `src/hardware/serial_link.py`（心跳/电池轮询/低电锁/模拟模式），含 13 条测试 | 🔶 已写好，待接实机 |
+| 下一步 | 台架验证固件 → 插上 Arduino 实机联调串口层 | ⬜ 未开始 |
 
 ## 已知问题与注意事项
 
@@ -200,26 +213,25 @@ PC（Python + pyserial，9600 波特）──串口指令──▶ ATmega328P �
 ## 后续计划
 
 1. **实机完整验证 `camera_preview.py`**：重构版还没完整跑过，用之前先测预览 / 录像 / 截图三项。
-2. **补常驻测试**：目前 `tests/` 只覆盖第 3 步（眨眼）与一个加载真实模型的冒烟测试；
-   第 4、5 步的行为验证目前是一次性脚本，还没落成常驻用例。
+2. **补常驻测试**：`tests/` 已覆盖第 3 步（眨眼）、串口层与界面渲染；第 4 步（视线方向）的行为
+   验证仍是一次性脚本，可照 `test_serial_link.py` 的样子落成常驻用例。
 3. **抽公共部分**：打开摄像头、构建检测器、中文绘制在五个脚本里各有一份拷贝，改一处要同步五处，
    是下一个该消除的重复。
 4. **台架验证 `firmware/wheelchair_controller.ino`**：按文件底部 7 条清单逐项过
    （接线核对 → PWM 噪音/温度 → 看门狗 → 长跑 → 转向先停 → 低电模拟 → 电压对表），
    全过后加装物理急停按钮。
-5. **写 Python 串口输出层**：按"硬件与固件"一节的协议表实现——当前指令每 ≤1 秒重发一次（心跳，
-   配合固件 3 秒超时），定期发 `GET_DATA` 收电池电压，低电时只发 `S`；识别层只产出意图，
-   发送动作单独一层。
+5. **实机联调串口层**：插上 Arduino，把 `gaze_blink_confirm_demo.py` 顶部 `ENABLE_HARDWARE`
+   改为 `True` 并填好串口号，验证心跳保活、`GET_DATA` 电池回报、低电强制停车三条链路。
 
 
 ## English Version
 # EyeWheelchairProject (Eye-Controlled Wheelchair Prototype)
 
-Eye-controlled wheelchair prototype — gaze + blink interaction, vision-only stage (no hardware control yet).
+Eye-controlled wheelchair prototype — gaze + blink interaction. The Python side runs as a pure screen simulation by default; the Arduino firmware and serial layer are written but not yet verified on the real chair.
 
 Using an ordinary USB camera to recognize "which direction the eyes are looking" and "whether there is a blink," the goal is to first get the **eye-control interaction** path working.
 
-> ⚠️ **At the current stage, everything is output only to the screen**: none of the programs send any commands to Arduino, motor driver boards, or the wheelchair, and no hardware control code is included. Only after the correctness of the recognition chain can be proven through tests and real-world trials will serial communication be considered.
+> ⚠️ **Safety boundary**: the Python side defaults to **pure screen simulation** (`ENABLE_HARDWARE = False` at the top of `gaze_blink_confirm_demo.py`) and sends no commands to any hardware. The Arduino firmware (`firmware/`) and the serial output layer (`src/hardware/`) are written but **not bench-verified and off by default**; no human ride testing before the bench checklist fully passes **and** a physical e-stop button is installed.
 
 ---
 
@@ -245,8 +257,10 @@ EyeWheelchairProject/
 │  └─ interaction/
 │     ├─ blink_preview.py             Step 3: Blink calibration and counting (refactored, with tests)
 │     ├─ gaze_direction_preview.py    Step 4: Gaze direction selection (left / center / right)
-│     └─ gaze_blink_confirm_demo.py   Step 5: Gaze selects direction + blink confirmation (full demo)
-├─ tests/                             pytest: blink decision behavior tests + no-camera smoke tests
+│     └─ gaze_blink_confirm_demo.py   Step 5: Gaze selects direction + blink confirmation (restyled UI, wired to the serial layer)
+│  └─ hardware/
+│     └─ serial_link.py               Serial output layer: intent→command, heartbeat, battery, low-battery lock (simulated by default)
+├─ tests/                             pytest: blink logic / serial link / UI rendering + model smoke test
 ├─ firmware/
 │  └─ wheelchair_controller.ino       Revised Arduino firmware (with bench checklist, pending verification)
 ├─ Related_materials/                 Hardware photos, reference firmware (ardino_demo.ino), etc.
@@ -256,7 +270,7 @@ EyeWheelchairProject/
 └─ README.md
 ```
 
-The five scripts **do not import each other** and can each run independently (the weekly development order is preserved for gradual verification).
+The five demo scripts run independently (the weekly development order is preserved for gradual verification). The only cross-file dependency is step 5 → `src/hardware/serial_link.py` (serial output layer), which itself runs in simulated mode by default.
 
 ## Code Organization
 
@@ -309,7 +323,7 @@ Two prerequisites:
 venv\Scripts\python.exe -m pytest -q
 ```
 
-Runs in about 1 second, covering blink calibration, normal counting, too-short/too-long ignoring, refractory period, face-loss reset, and other behaviors, plus a smoke test that loads the real model. All tests use synthetic data and **do not require a camera**; the video test is automatically skipped when there is no usable recording in `data/raw_videos`.
+Runs in about 1 second, 29 tests in total: blink calibration / counting / too-short & too-long ignoring / refractory period / face-loss reset; serial-link intent translation / heartbeat / battery parsing / low-battery lock; UI rendering smoke tests; plus one smoke test that loads the real model. All use synthetic data and **need no camera or hardware**; the video test is automatically skipped when there is no usable recording in `data/raw_videos`.
 
 Habit when changing code: **run `pytest` once before and after each change**. It will directly tell you "whether this change broke existing behavior," without needing to open the camera and verify by eye.
 
@@ -330,7 +344,7 @@ PC (Python + pyserial, 9600 baud) ──commands──▶ ATmega328P ──INA/I
 Battery ──▶ 0–25 V voltage sensor (1:5 divider) ──▶ A0
 ```
 
-### Serial command protocol (defined by the firmware; implement the Python side to match)
+### Serial command protocol (defined by the firmware; implemented on the Python side in `serial_link.py`)
 
 | Command | Action |
 |---|---|
@@ -348,6 +362,14 @@ Two firmware files:
 - `Related_materials/ardino_demo.ino` — **reference copy**, kept untouched;
 - `firmware/wheelchair_controller.ino` — **revised version**: watchdog, serial char buffer, stop-before-turn, PWM frequency fix (~18 kHz), battery averaging + hysteresis, throttled low-battery warnings, etc. Every change carries a 【修订】 marker, and the file ends with a **7-item bench verification checklist** (wiring check, noise/temperature, watchdog, long run, stop-before-turn, low-battery simulation, voltage cross-check).
 
+The Python serial output layer is also in place: `src/hardware/serial_link.py`
+(the `WheelchairLink` class: intent → protocol letters, 1 s heartbeat re-send of the current
+command, `GET_DATA` battery polling every 2 s, a second low-battery lock that forces stop;
+with `port=None` it runs in a **simulated mode**, so the full test suite needs no hardware).
+`gaze_blink_confirm_demo.py` is wired to it: by default `ENABLE_HARDWARE = False` (pure screen
+simulation); set it to `True` with the right port and only then does a confirmed direction
+actually go out to the firmware.
+
 > ⚠️ Install the **TimerOne** library in the Arduino IDE before compiling. The bench checklist must fully pass **and a physical e-stop button** (cutting motor power directly) must be added before any human ride testing.
 
 ## Progress
@@ -361,7 +383,8 @@ Two firmware files:
 | Step 5 | Gaze selects direction + blink confirmation (screen demo) | ✅ Refactored (preliminary tests pass) |
 | Code tidy-up | Four scripts unified into the three-section layout with call-graph comments; decision logic unit-testable | ✅ |
 | Firmware | Safety-revised Arduino controller (watchdog / char buffer / stop-before-turn / PWM frequency), with bench checklist | 🔶 Written, awaiting bench verification |
-| Next | Python serial output layer (heartbeat re-send + GET_DATA + low-battery handling) | ⬜ Not started |
+| Serial output layer | `src/hardware/serial_link.py` (heartbeat / battery polling / low-battery lock / simulated mode), 13 tests | 🔶 Written, awaiting on-device integration |
+| Next | Bench-verify the firmware → plug in the Arduino and integrate the serial layer | ⬜ Not started |
 
 ## Known Issues and Notes
 
@@ -384,7 +407,7 @@ These three are the current, real boundaries of the system and are "known, delib
 ## Future Plans
 
 1. **Fully verify `camera_preview.py` on the real machine**: the refactored version has never been run end to end — test preview / record / snapshot first.
-2. **Add permanent tests**: `tests/` currently covers step 3 (blink) plus one smoke test that loads the real model; the step 4 and 5 behaviour checks are still one-off scripts.
+2. **Add permanent tests**: `tests/` now covers step 3 (blink), the serial layer and UI rendering; the step 4 (gaze direction) behaviour checks are still one-off scripts and could be turned into permanent cases like `test_serial_link.py`.
 3. **Extract the common parts**: opening the camera, building detectors and drawing Chinese text are copied in all five scripts, so one change means five edits — the next duplication to remove.
 4. **Bench-verify `firmware/wheelchair_controller.ino`**: work through the 7-item checklist at the end of the file (wiring check → PWM noise/temperature → watchdog → long run → stop-before-turn → low-battery simulation → voltage cross-check); then add a physical e-stop button.
-5. **Write the Python serial output layer**: implement the protocol table in "Hardware and Firmware" — re-send the current command every ≤1 s (heartbeat, matching the firmware's 3 s timeout), poll `GET_DATA` for battery voltage, send only `S` when the battery is low; the recognition layer only produces intent, sending is a separate layer.
+5. **On-device integration of the serial layer**: plug in the Arduino, set `ENABLE_HARDWARE = True` with the right port in `gaze_blink_confirm_demo.py`, and verify the three chains — heartbeat keep-alive, `GET_DATA` battery replies, and forced stop on low battery.

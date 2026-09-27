@@ -1,7 +1,9 @@
 """第 5 步：视线选方向 + 眨眼确认（纯屏幕演示）。
 
 流程：看正中校准 3 秒 → 稳定注视 左转/前进/右转 → 自然眨眼确认。
-确认结果仅显示在屏幕上，不会向 Arduino、驱动板或轮椅发送任何指令。
+默认（ENABLE_HARDWARE = False）是纯屏幕模拟：确认结果只显示，不发任何指令。
+把顶部 ENABLE_HARDWARE 改为 True 并接好 Arduino 后，确认成功的方向才会经
+src/hardware/serial_link.py 发给固件（含 1 秒心跳、电池回报、低电强制停车）。
 按 Q 退出；C 重新校准；I 反转左右方向。
 
 文件分三段：
@@ -18,6 +20,8 @@
   │   ├─ make_detector()              建识别器：加载 models/face_landmarker.task
   │   ├─ GazeBlinkDetector(started)   建状态机；校准从此刻开始计时
   │   │    └─ self.reset(now)         把所有状态置位（按 C 重新校准走的也是它）
+  │   ├─ WheelchairLink(...)           硬件链路（src/hardware/serial_link.py；默认模拟模式）
+  │   │    └─ link.open()             串口打不开时自动退回模拟并记录原因
   │   └─ chinese_font(20)             预加载中文字体，缺字体时立刻报错
   │
   ├─ 每帧循环（★ 每帧都执行；顺序 看 → 判 → 报 → 控）
@@ -33,13 +37,15 @@
   │   │    ├─ _update_calibration()            校准未完成时走这里
   │   │    ├─ _update_selection()              校准完成后走这里（视线选择 + 眨眼确认）
   │   │    └─ _status(...) → GazeBlinkStatus   把本帧结果打包返回
-  │   ├─★ show_status(frame, status)           铺黑底 + 四行中文 + 三张卡片 + 推窗口
-  │   │    ├─ chinese_overlay(frame, 四行文字) → chinese_font(29 / 20)
-  │   │    └─ cards(frame, status.active)      → chinese_font(36)
+  │   ├─★ link.update(now)                     硬件链路：心跳重发当前指令 + 收电池回报
+  │   │    └─ 确认成功的瞬间：link.set_intent(方向) → 翻译成 L/F/R 发给固件
+  │   ├─★ show_status(frame, status, now, fps, link_info)  渲染界面并推窗口
+  │   │    └─ render_overlay(...)              面板/指示灯/进度条/卡片/角标（单次 PIL 转换）
   │   ├─★ window_is_alive()                    问窗口还活着没（点 ✕ 后为假）
   │   └─★ pressed_key(now, key_available_at)   读按键：q 退出 / c → reset / i → 反转
   │
   └─ finally（无论怎么退出都执行）
+      ├─ link.set_intent("停") + link.close()  先叫停再挂断（模拟模式下是空操作）
       ├─ cap.release()                   交还摄像头
       └─ cv2.destroyAllWindows()         关窗口
 
@@ -58,12 +64,17 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 import math
+import sys
 import time
 
 import cv2
 import mediapipe as mp
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+# 本项目各脚本独立运行（没有包结构），把 src/ 加进搜索路径以引入硬件接口
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from hardware.serial_link import WheelchairLink  # noqa: E402  ← 在 sys.path 之后导入
 
 # ---- 运行参数 ----
 CAMERA_INDEX = 0
@@ -78,6 +89,11 @@ MIN_OPEN_SECONDS, REFRACTORY_SECONDS = 0.10, 0.30    # 需要稳定睁眼多久 
 GAZE_SMOOTHING_FRAMES = 5                            # 虹膜位置平滑：最近几帧取平均
 EAR_SMOOTHING_FRAMES = 3                             # 眼睛开合值平滑：最近几帧取平均
 KEY_DEBOUNCE_SECONDS = 0.25                          # 两次按键响应的最小间隔：按住不放时不再连发
+
+# ---- 硬件链路（协议与安全机制见 src/hardware/serial_link.py 和 README）----
+ENABLE_HARDWARE = False      # ⚠️ False=纯屏幕模拟（默认）；True 时确认结果会真的发往串口
+SERIAL_PORT = "COM3"         # Arduino 的串口号（设备管理器里查）；打不开自动退回模拟模式
+FACE_LOST_STOP_SECONDS = 2.0 # 人脸连续丢失这么久 → 主动发"停"（固件的 3 秒超时是兜底）
 
 # ---- 路径与窗口 ----
 ROOT = Path(__file__).resolve().parents[2]
@@ -161,6 +177,8 @@ class GazeBlinkStatus:
     score: float | None   # 本帧的虹膜位置（没人脸时是 None）
     ear: float | None     # 本帧的眼睛开合值（没人脸时是 None）
     active: str | None    # 该高亮哪张卡片：左转 / 前进 / 右转 / None
+    calibration_progress: float | None = None  # 校准进度 0~1（仅校准状态有值）
+    stability_progress: float | None = None    # 方向稳定进度 0~1（仅选择方向状态有值）
 
 
 class GazeBlinkDetector:
@@ -250,7 +268,8 @@ class GazeBlinkDetector:
             self._message = "未检测到人脸：已暂停，重新正对摄像头"
             if self._state != "校准":
                 self._state, self._stable_choice, self._pending = "选择方向", None, None
-            return self._status(score=None, ear=None)
+            return self._status(score=None, ear=None,
+                                calibration_progress=None, stability_progress=None)
 
         score = gaze_score(landmarks)                 # 眼睛在看哪边
         current_ear = average_ear(landmarks)          # 眼睛张多开
@@ -260,6 +279,13 @@ class GazeBlinkDetector:
             score = sum(self._gaze_history) / len(self._gaze_history)
         self._ear_history.append(current_ear)
         current_ear = sum(self._ear_history) / len(self._ear_history)
+
+        # 进度条数据按"本帧进入时的状态"算：这样校准完成的那一帧也能看到 100% 满条
+        calibration_progress = stability_progress = None
+        if self._state == "校准":
+            calibration_progress = min((now - self._calibration_started) / self._calibration_seconds, 1.0)
+        elif self._state == "选择方向" and self._direction_since is not None:
+            stability_progress = min((now - self._direction_since) / self._select_stable_seconds, 1.0)
 
         # ---- 按状态分派 ----
         # 【状态一：校准】攒够 3 秒且样本足够 → 算出三个"标尺"，转入选择方向
@@ -272,7 +298,9 @@ class GazeBlinkDetector:
         elif self._state == "确认成功" and self._confirm_started and now - self._confirm_started >= 1.6:
             self._state, self._stable_choice, self._pending, self._direction_since = "选择方向", None, None, now
             self._message = "请继续选择下一项方向"
-        return self._status(score=score, ear=current_ear)
+        return self._status(score=score, ear=current_ear,
+                            calibration_progress=calibration_progress,
+                            stability_progress=stability_progress)
 
     def _update_calibration(self, now: float, score: float, current_ear: float) -> None:
         """校准阶段：攒样本，够 3 秒且样本足够后算出三个标尺。"""
@@ -336,10 +364,15 @@ class GazeBlinkDetector:
         # 【状态三 → 四】只有"等待眨眼"期间的眨眼才被当作确认
         if self._state == "等待眨眼" and blink_confirmed:
             self._state, self._confirm_started = "确认成功", now
-            self._message = f"已确认“{self._pending}”——这是模拟指令，不会移动轮椅"
+            # 是否真的发往硬件看右上角链路状态（模拟/串口），状态机保持纯逻辑
+            self._message = f"已确认“{self._pending}”"
 
-    def _status(self, score: float | None, ear: float | None) -> GazeBlinkStatus:
-        """把当前内部状态打包成 GazeBlinkStatus（界面唯一能读到的东西）。"""
+    def _status(self, score: float | None, ear: float | None,
+                calibration_progress: float | None, stability_progress: float | None) -> GazeBlinkStatus:
+        """把当前内部状态打包成 GazeBlinkStatus（界面唯一能读到的东西）。
+
+        两个进度由 update() 按"本帧进入时的状态"算好传进来（详见那里的注释）。
+        """
         # 高亮哪张卡片：等待眨眼/确认成功时高亮 pending，其余时候高亮已稳定的候选
         active = self._pending if self._state in ("等待眨眼", "确认成功") else self._stable_choice
         return GazeBlinkStatus(
@@ -348,6 +381,8 @@ class GazeBlinkDetector:
             score=score,
             ear=ear,
             active=active,
+            calibration_progress=calibration_progress,
+            stability_progress=stability_progress,
         )
 
 
@@ -416,35 +451,127 @@ def chinese_font(size: int):
     )
 
 
-def chinese_overlay(frame, lines):
-    """把四行中文画到画面上（OpenCV 自带字体画不了中文，所以用 PIL + 系统字体）。
+# ---- 界面配色（BGR）与几何常量 ----
+PANEL_BG, PANEL_BORDER = (30, 30, 36), (90, 120, 160)   # 深色面板 + 蓝灰描边
+STATE_COLORS = {                        # 每个状态一个指示灯颜色
+    "校准": (60, 200, 255),             # 黄
+    "选择方向": (120, 200, 120),        # 绿
+    "等待眨眼": (40, 170, 255),         # 橙
+    "确认成功": (90, 255, 130),         # 亮绿
+}
+BAR_BG = (62, 62, 70)                   # 进度条底槽
+CARD_BG, CARD_BORDER = (45, 45, 52), (95, 95, 105)
+CARD_CANDIDATE = (40, 180, 255)         # 琥珀色：已稳定候选
+CARD_CONFIRM_FILL = (70, 170, 95)       # 绿色：等待眨眼 / 已确认
+TEXT_VALUES, TEXT_MAIN, TEXT_HINT = (120, 255, 120), (255, 255, 255), (175, 175, 175)
+CARD_RECTS = [("左转", 35, 390, 280, 515), ("前进", 340, 390, 585, 515), ("右转", 645, 390, 890, 515)]
+PANEL_W, PANEL_H = 640, 164
+BAR_X1, BAR_X2 = 70, 330
 
-    调用关系：被 show_status() 调用；内部调用 chinese_font() 取字体。
-    注意它不修改传入的 frame，而是返回一张画好字的新图。
+
+def _pil_text(frame, items):
+    """一次 PIL 往返画完全部中文（旧版每帧最多 4 次 BGR↔RGB 转换，这里只做 1 次）。
+
+    items = [(x, y, 文本, 字号, BGR颜色), ...]
+    调用关系：被 render_overlay() 调用；内部调用 chinese_font()（带缓存）。
     """
     image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(image)
-    small, large = chinese_font(20), chinese_font(29)
-    positions = [(14, 10, small, (0, 255, 0)), (14, 37, large, (255, 255, 0)),
-                 (14, 76, small, (255, 255, 255)), (14, 103, small, (255, 210, 80))]
-    for text, (x, y, font, color) in zip(lines, positions):
-        draw.text((x, y), text, font=font, fill=color)
+    for x, y, text, size, color in items:
+        draw.text((x, y), text, font=chinese_font(size), fill=(color[2], color[1], color[0]))
     return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
 
-def cards(frame, active):
-    """画底部三张卡片：左转 / 前进 / 右转；active 那一张用实心绿色高亮。
+def _card_mode(status) -> str:
+    """三张卡片该用哪种画法：none=普通 / candidate=琥珀候选 / confirmed=绿色已确认。"""
+    if status.state in ("等待眨眼", "确认成功") and status.active:
+        return "confirmed"
+    if status.state == "选择方向" and status.active:
+        return "candidate"
+    return "none"
 
-    调用关系：被 show_status() 调用；active 由状态机算好（放在 GazeBlinkStatus.active 里）。
-    """
-    options = [("左转", 35, 390, 280, 515), ("前进", 340, 390, 585, 515), ("右转", 645, 390, 890, 515)]
-    for label, x1, y1, x2, y2 in options:
-        color = (0, 170, 0) if label == active else (70, 70, 70)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, -1 if label == active else 2)
-        image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        ImageDraw.Draw(image).text((x1 + 64, y1 + 38), label, font=chinese_font(36), fill=(255, 255, 255))
-        frame = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+def _draw_panel(frame, status):
+    """状态面板的底板、状态指示灯和两条进度条（文字统一在 _pil_text 里画）。"""
+    color = STATE_COLORS.get(status.state, TEXT_MAIN)
+    cv2.rectangle(frame, (0, 0), (PANEL_W, PANEL_H), PANEL_BG, -1)
+    cv2.rectangle(frame, (0, 0), (PANEL_W, PANEL_H), PANEL_BORDER, 1)
+    cv2.circle(frame, (26, 32), 8, color, -1)                     # 状态指示灯
+    for y, progress in ((80, status.calibration_progress), (100, status.stability_progress)):
+        cv2.rectangle(frame, (BAR_X1, y), (BAR_X2, y + 8), BAR_BG, -1)       # 进度条底槽
+        if progress is not None:
+            fill_w = int((BAR_X2 - BAR_X1) * max(0.0, min(1.0, progress)))
+            if fill_w > 0:
+                cv2.rectangle(frame, (BAR_X1, y), (BAR_X1 + fill_w, y + 8), color, -1)
     return frame
+
+
+def _draw_cards(frame, status, now, mode):
+    """底部三张卡片：普通 / 已稳定候选（琥珀边+顶部色条）/ 等待确认与已确认（绿底+呼吸灯+对勾）。"""
+    pulse = 0.5 + 0.5 * math.sin(now * 6.0)                       # 呼吸灯相位
+    for label, x1, y1, x2, y2 in CARD_RECTS:
+        if label != status.active:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), CARD_BG, -1)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), CARD_BORDER, 2)
+        elif mode == "confirmed":
+            cv2.rectangle(frame, (x1, y1), (x2, y2), CARD_CONFIRM_FILL, -1)
+            glow = tuple(int(c * (0.65 + 0.35 * pulse)) for c in (150, 255, 190))
+            cv2.rectangle(frame, (x1, y1), (x2, y2), glow, 4)     # 边框随呼吸明暗
+            if status.state == "确认成功":                        # 右上角对勾
+                pts = np.array([(x2 - 52, y1 + 34), (x2 - 40, y1 + 46), (x2 - 16, y1 + 12)])
+                cv2.polylines(frame, [pts], False, (255, 255, 255), 4)
+        else:  # candidate
+            cv2.rectangle(frame, (x1, y1), (x2, y2), CARD_BG, -1)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), CARD_CANDIDATE, 4)
+            cv2.rectangle(frame, (x1, y1), (x2, y1 + 8), CARD_CANDIDATE, -1)  # 顶部色条
+    return frame
+
+
+def _draw_chips(frame, link_info):
+    """右上角两枚角标的底板：帧率、硬件链路状态（模式/电量）。文字在 _pil_text 里画。"""
+    cv2.rectangle(frame, (WIDTH - 120, 8), (WIDTH - 8, 40), PANEL_BG, -1)
+    cv2.rectangle(frame, (WIDTH - 340, 8), (WIDTH - 128, 40), PANEL_BG, -1)
+    return frame
+
+
+def render_overlay(frame, status, now, fps, link_info):
+    """把本帧全部界面元素画好并返回新帧（纯绘制：不 imshow、不碰任何状态，可单测）。
+
+    调用关系：被 show_status() 调用（main 每帧一次）；
+    内部调用 _draw_panel / _draw_cards / _draw_chips / _pil_text。
+    """
+    mode = _card_mode(status)
+    frame = _draw_panel(frame, status)
+    frame = _draw_cards(frame, status, now, mode)
+    frame = _draw_chips(frame, link_info)
+
+    score_t = "--" if status.score is None else f"{status.score:.3f}"
+    ear_t = "--" if status.ear is None else f"{status.ear:.3f}"
+    items = [
+        (44, 18, f"当前状态：{status.state}", 24, STATE_COLORS.get(status.state, TEXT_MAIN)),
+        (16, 52, f"虹膜位置 {score_t}    眼睛开合 {ear_t}", 18, TEXT_VALUES),
+        (16, 78, "校准", 15, TEXT_HINT),
+        (16, 98, "稳定", 15, TEXT_HINT),
+        (16, 118, status.message, 18, TEXT_MAIN),
+        (16, 142, "Q 退出｜C 重新校准｜I 反转左右", 16, TEXT_HINT),
+        (WIDTH - 108, 14, f"{fps:.0f} FPS", 18, TEXT_VALUES),
+    ]
+    hw_text, hw_color = "模拟模式", TEXT_HINT
+    if link_info is not None:
+        if link_info.connected:
+            hw_text = f"{link_info.mode} 已发 {link_info.send_count}"
+            if link_info.battery is not None:
+                hw_text += f" 电 {link_info.battery[0]}% {link_info.battery[1]:.1f}V"
+            hw_color = (60, 60, 255) if link_info.is_low_battery else (120, 255, 120)
+        elif link_info.last_error:
+            hw_text = "模拟（串口未连上）"
+    items.append((WIDTH - 332, 14, hw_text, 16, hw_color))
+    for label, x1, _, y1, _ in CARD_RECTS:
+        tcolor = TEXT_MAIN
+        if label == status.active:
+            tcolor = (255, 255, 255) if mode == "confirmed" else CARD_CANDIDATE
+        items.append((x1 + 90, y1 + 40, label, 40, tcolor))
+    return _pil_text(frame, items)
 
 
 # ============================ 3) 主流程 ============================
@@ -479,23 +606,9 @@ def draw_points(frame, landmarks) -> None:
         cv2.circle(frame, (int(p.x * w), int(p.y * h)), 2, (0, 255, 255), -1)
 
 
-def show_status(frame, status) -> None:
-    """铺黑色底板 + 四行中文 + 底部三张卡片，然后推给窗口。
-
-    调用关系：被 main() 每帧调用（循环第三步）；内部调用 chinese_overlay() 和 cards()。
-    它只读 status，不改任何状态——所以调它不会影响判定。
-    """
-    cv2.rectangle(frame, (0, 0), (780, 130), (0, 0, 0), -1)
-    score_t = "--" if status.score is None else f"{status.score:.3f}"
-    ear_t = "--" if status.ear is None else f"{status.ear:.3f}"
-    frame = chinese_overlay(frame, [
-        f"虹膜位置：{score_t}｜眼睛开合值：{ear_t}",
-        f"当前状态：{status.state}",
-        status.message,
-        "Q 退出｜C 重新校准｜I 反转左右｜仅屏幕模拟，不控制硬件",
-    ])
-    frame = cards(frame, status.active)
-    cv2.imshow(WINDOW, frame)
+def show_status(frame, status, now, fps, link_info) -> None:
+    """渲染整帧界面（render_overlay）并推给窗口。被 main() 每帧调用。"""
+    cv2.imshow(WINDOW, render_overlay(frame, status, now, fps, link_info))
 
 
 def window_is_alive() -> bool:
@@ -525,18 +638,28 @@ def pressed_key(now: float, key_available_at: float):
 
 def main() -> None:
     print(cat)
-    """程序入口：建好摄像头和识别器后，每帧走一遍 看→判→报→控。"""
+    """程序入口：建好摄像头、识别器、硬件链路后，每帧走一遍 看→判→连→报→控。"""
     # ==================== 启动阶段（下面每个调用只执行一次）====================
     cap = open_camera()                          # ① 打开摄像头
     detector = make_detector()                   # ② 建识别器
     started = time.perf_counter()                # 给 MediaPipe 算毫秒时间戳用
     flow = GazeBlinkDetector(started)            # ③ 建状态机；校准从此刻开始计时
+    link = WheelchairLink(SERIAL_PORT if ENABLE_HARDWARE else None)  # ④ 硬件链路（默认模拟）
+    link.open()                                  #    串口打不开时自动退回模拟模式
     key_available_at = 0.0                       # 按键防抖：下次允许响应的时间点
-    chinese_font(20)                             # ④ 提前加载字体，字体缺失时立刻报错
+    chinese_font(20)                             # ⑤ 提前加载字体，字体缺失时立刻报错
+    frame_count = 0                              # 只用来算 FPS
+    prev_state = None                            # 用来捕捉"确认成功"这一瞬间
+    face_lost_since = None                       # 人脸持续丢失的起点（超时就发"停"）
 
     print("视线选择演示已启动：请先点一下视频窗口让它获得焦点，然后 Q 退出、C 重新校准、I 反转左右。")
+    if link.connected:
+        print(f"硬件链路已连接：{link.mode}。确认成功的方向会真的发往固件（低电时被强制为停止）。")
+    else:
+        reason = f"（{link.last_error}）" if link.last_error else ""
+        print(f"模拟模式{reason}：确认结果只显示在屏幕上，不会发出任何指令。")
     try:
-        # ================= 每帧循环：看 → 判 → 报 → 控 =================
+        # ================= 每帧循环：看 → 判 → 连 → 报 → 控 =================
         while True:
             # ---- ① 看：取一帧并识别，拿回 478 个关键点 ----
             frame, now, landmarks = read_frame(cap, detector, started)
@@ -546,10 +669,24 @@ def main() -> None:
             # ---- ② 判：视线 + 眨眼，四状态机全在 GazeBlinkDetector 里 ----
             status = flow.update(now, landmarks)
 
-            # ---- ③ 报：四行中文 + 三张卡片，推给窗口 ----
-            show_status(frame, status)
+            # ---- ③ 连：硬件链路（心跳/收电池）+ 状态变化时下发意图 ----
+            link_info = link.update(now)
+            if prev_state == "等待眨眼" and status.state == "确认成功" and status.active:
+                link.set_intent(status.active)   # "左转"→L / "前进"→F / "右转"→R；低电强制为"停"
+            prev_state = status.state
+            if landmarks is None:
+                face_lost_since = face_lost_since if face_lost_since is not None else now
+                if now - face_lost_since >= FACE_LOST_STOP_SECONDS:
+                    link.set_intent("停")        # 人不见了 → 主动停车（固件超时是兜底）
+            else:
+                face_lost_since = None
 
-            # ---- ④ 控：先看窗口还活着没，再读键盘 ----
+            # ---- ④ 报：状态面板 + 进度条 + 卡片 + 角标，推给窗口 ----
+            frame_count += 1
+            fps = frame_count / max(now - started, 0.001)
+            show_status(frame, status, now, fps, link_info)
+
+            # ---- ⑤ 控：先看窗口还活着没，再读键盘 ----
             if not window_is_alive():            # 窗口被点 ✕ 关掉就退出
                 print("窗口已关闭，退出。")
                 break
@@ -558,9 +695,12 @@ def main() -> None:
                 break
             if key == "c":
                 flow.reset(now)                  # 回到校准起点，重新采集一次标尺
+                link.set_intent("停")            # 校准期间不该挂着旧指令
             if key == "i":
                 flow.toggle_invert()             # 左右方向反转 / 恢复
     finally:
+        link.set_intent("停")                    # 无论怎么退出先叫停（模拟模式下是空操作）
+        link.close()
         # 不调用 detector.close()：实测它要卡约 42 秒（MediaPipe 1.0.1 拆推理图的等待）。
         # 配合 make_detector() 里的保活引用，进程 1 秒内干净退出，内存由系统回收。
         cap.release()

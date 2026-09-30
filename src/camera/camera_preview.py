@@ -3,14 +3,20 @@ from datetime import datetime
 from pathlib import Path
 import time
 
+import sys
+
 import cv2
+
+# 本项目各脚本独立运行（没有包结构），把 src/ 加进搜索路径以引入 common 层
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.camera_utils import open_camera  # noqa: E402  ← 在 sys.path 之后导入
+from common.paths import PROJECT_ROOT  # noqa: E402
 
 CAMERA_INDEX = 0
 WIDTH = 1280
 HEIGHT = 720
 WINDOW_NAME = "EyeWheelchair Camera | Q quit | R record | S snapshot"
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 VIDEO_DIR = PROJECT_ROOT / "data" / "raw_videos"
 SNAPSHOT_DIR = PROJECT_ROOT / "data" / "snapshots"
 
@@ -30,19 +36,6 @@ def ensure_dirs() -> None:
 
 # ---------- 摄像头 ----------
 
-def open_camera() -> cv2.VideoCapture:
-    """打开摄像头，设置分辨率，失败则抛异常。"""
-    cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        cap = cv2.VideoCapture(CAMERA_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
-    if not cap.isOpened():
-        raise RuntimeError(
-            "摄像头无法打开。请拔插 USB 摄像头；关闭占用摄像头的软件；"
-            "或把 CAMERA_INDEX 从 0 改为 1。"
-        )
-    return cap
 
 
 def read_frame(cap: cv2.VideoCapture):
@@ -164,7 +157,7 @@ def run_loop(cap: cv2.VideoCapture) -> None:
 
 def main() -> None:
     ensure_dirs()
-    cap = open_camera()
+    cap = open_camera(CAMERA_INDEX, WIDTH, HEIGHT)
     print("摄像头已打开：按 Q 退出，按 R 录制，按 S 截图。")
     try:
         run_loop(cap)

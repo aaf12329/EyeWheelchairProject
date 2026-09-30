@@ -38,6 +38,10 @@ Eye-controlled wheelchair prototype — gaze + blink interaction. Python side ru
 ```
 EyeWheelchairProject/
 ├─ src/
+│  ├─ common/                        ★ 共用层：全项目唯一实现，人人读它、它不调用任何人
+│  │  ├─ paths.py                     路径地址簿：项目根 / 模型权重 / 字体候选（禁止各文件自拼路径）
+│  │  ├─ camera_utils.py              open_camera()：DirectShow 优先 + 分辨率设置（原 5 份副本合并）
+│  │  └─ draw_utils.py                chinese_font() / draw_text()：PIL 中文绘制（原 4 份副本合并）
 │  ├─ camera/
 │  │  └─ camera_preview.py            第 1 周：摄像头基线（预览 / 录像 / 截图）
 │  ├─ vision/
@@ -295,6 +299,10 @@ Why use two dimensions (gaze + blink): gaze is responsible for "selecting," blin
 ```
 EyeWheelchairProject/
 ├─ src/
+│  ├─ common/                        ★ Shared layer: single implementation, read by all, calls none
+│  │  ├─ paths.py                     Path registry: project root / weights / fonts (no ad-hoc paths)
+│  │  ├─ camera_utils.py              open_camera(): DirectShow-first + resolution (merged from 5 copies)
+│  │  └─ draw_utils.py                chinese_font() / draw_text(): PIL Chinese drawing (merged from 4 copies)
 │  ├─ camera/
 │  │  └─ camera_preview.py            Week 1: Camera baseline (preview / record / snapshot)
 │  ├─ vision/

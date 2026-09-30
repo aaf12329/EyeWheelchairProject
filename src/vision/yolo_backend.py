@@ -47,11 +47,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# ---- 默认权重路径（与仓库 models/ 一致；也可在构造时传入别的路径）----
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_EYE_WEIGHTS = PROJECT_ROOT / "models" / "eye_yolo26n.pt"
-DEFAULT_GAZE_WEIGHTS = PROJECT_ROOT / "models" / "gaze5_yolo26s.pt"
-DEFAULT_YUNET = PROJECT_ROOT / "models" / "face_detection_yunet_2023mar.onnx"
+from common.paths import EYE_WEIGHTS, GAZE5_WEIGHTS, YUNET_WEIGHTS  # 路径地址簿（src/common/）
+
+# ---- 默认权重路径：一律从 common.paths（路径地址簿）取，禁止本文件自己拼路径 ----
+DEFAULT_EYE_WEIGHTS = EYE_WEIGHTS
+DEFAULT_GAZE_WEIGHTS = GAZE5_WEIGHTS
+DEFAULT_YUNET = YUNET_WEIGHTS
 
 # ---- 推理参数（与 Yolo_model/scripts 的 live / eval 同款）----
 IMGSZ = 128          # 训练时的输入尺寸，推理必须一致

@@ -21,15 +21,16 @@ GazeDirectionDetector 状态机（校准/稳定停留/候选）逻辑没变，�
   3) 主流程 main()：读帧 → 更新状态机 → 画 → 按键
 
 ============================ 调用关系总览 ============================
+  │   （路径/摄像头/中文字体 来自共用层 src/common/，见 common/paths.py 地址簿）
 
   __main__  →  main()
   │
   ├─ 启动阶段（每个只执行一次）
-  │   ├─ open_camera()                  打开摄像头，返回 cap（后面每帧从它 read）
+  │   ├─ open_camera()  ←common层       打开摄像头，返回 cap（后面每帧从它 read）
   │   ├─ make_backend()                 建 YOLO 后端：加载 eye + gaze5 权重
   │   ├─ GazeDirectionDetector(started) 建状态机；校准从此刻开始计时
   │   │    └─ self.reset(now)           把所有状态置位（按 C 重新校准走的也是它）
-  │   └─ chinese_font(20)               预加载中文字体，缺字体时立刻报错
+  │   └─ chinese_font(20) ←common层     预加载中文字体，缺字体时立刻报错
   │
   ├─ 每帧循环（★ 每帧都执行；顺序 看 → 判 → 报 → 控）
   │   ├─★ read_frame(cap, backend)
@@ -75,6 +76,8 @@ from PIL import Image, ImageDraw, ImageFont
 # 本项目各脚本独立运行（没有包结构），把 src/ 加进搜索路径以引入 YOLO 后端
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vision.yolo_backend import YoloEyeGaze, draw_eye_boxes  # noqa: E402  ← 在 sys.path 之后导入
+from common.camera_utils import open_camera  # noqa: E402  ← 共用层（src/common/）
+from common.draw_utils import chinese_font, draw_text  # noqa: E402
 
 # ---- 运行参数 ----
 CAMERA_INDEX = 0
@@ -90,14 +93,7 @@ MESSAGE_INITIAL = "请看屏幕正中间，正在校准"
 MESSAGE_RECALIBRATE = "重新校准：请看屏幕正中间"
 
 # ---- 路径与窗口 ----
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WINDOW_NAME = "Gaze Direction (YOLO) | Q quit | C recalibrate | I invert | visual test only"
-# 中文字体逐个探测：msyh 缺失时回退，换机器不会直接崩
-FONT_CANDIDATES = (
-    Path(r"C:\Windows\Fonts\msyh.ttc"),
-    Path(r"C:\Windows\Fonts\simhei.ttf"),
-    Path(r"C:\Windows\Fonts\arial.ttf"),
-)
 
 
 # ============================ 1) 判定逻辑（纯逻辑） ============================
@@ -243,19 +239,6 @@ class GazeDirectionDetector:
 # ============================ 2) 摄像头与画面 ============================
 
 
-def open_camera() -> cv2.VideoCapture:
-    """打开摄像头并设置画面宽高；打不开时报一句中文提示。
-
-    调用关系：被 main() 在启动时调用一次，返回的 cap 会一路传给 read_frame()。
-    """
-    cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        cap = cv2.VideoCapture(CAMERA_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
-    if not cap.isOpened():
-        raise RuntimeError("摄像头无法打开，请关闭占用摄像头的软件后重试。")
-    return cap
 
 
 def make_backend() -> YoloEyeGaze:
@@ -268,37 +251,10 @@ def make_backend() -> YoloEyeGaze:
     return YoloEyeGaze()
 
 
-_font_cache: dict[tuple[Path, int], "ImageFont.FreeTypeFont"] = {}
 
 
-def chinese_font(size: int):
-    """按 FONT_CANDIDATES 找到第一个可用字体并缓存，避免每帧重复读字体文件。
-
-    调用关系：被 draw_text() 调用（每帧 3 行文字 + 3 张卡片）；
-    第一次真正读文件，之后直接命中缓存。
-    """
-    for path in FONT_CANDIDATES:
-        if not path.exists():
-            continue
-        cached = _font_cache.get((path, size))
-        if cached is None:
-            cached = ImageFont.truetype(str(path), size)
-            _font_cache[(path, size)] = cached
-        return cached
-    raise FileNotFoundError(
-        "找不到可用的中文字体，请检查 FONT_CANDIDATES：" + "、".join(str(p) for p in FONT_CANDIDATES)
-    )
 
 
-def draw_text(frame, text, xy, size, color):
-    """在画面上画一行中文（OpenCV 自带字体画不了中文，所以用 PIL + 系统字体）。
-
-    调用关系：被 show_status() 和 draw_cards() 调用；内部调用 chinese_font()。
-    注意它不修改传入的 frame，而是返回一张画好字的新图。
-    """
-    image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    ImageDraw.Draw(image).text(xy, text, font=chinese_font(size), fill=color)
-    return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
 
 def draw_cards(frame, candidate: str):
@@ -379,7 +335,7 @@ def pressed_key(now: float, key_available_at: float):
 def main() -> None:
     """程序入口：建好摄像头和 YOLO 后端后，每帧走一遍 看→判→报→控。"""
     # ==================== 启动阶段（下面每个调用只执行一次）====================
-    cap = open_camera()                          # ① 打开摄像头
+    cap = open_camera(CAMERA_INDEX, WIDTH, HEIGHT)                          # ① 打开摄像头
     backend = make_backend()                     # ② 建 YOLO 后端
     flow = GazeDirectionDetector(time.perf_counter())  # ③ 建状态机；校准从此刻开始计时
     key_available_at = 0.0                       # 按键防抖：下次允许响应的时间点

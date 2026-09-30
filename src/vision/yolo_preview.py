@@ -17,11 +17,12 @@
   3) 主流程 main()：读帧 → 推理 → 画 → 推窗口 → 按键
 
 ============================ 调用关系总览 ============================
+  │   （路径/摄像头/中文字体 来自共用层 src/common/，见 common/paths.py 地址簿）
 
   __main__  →  main()
   │
   ├─ 启动阶段（每个只执行一次）
-  │   ├─ open_camera()                打开摄像头，返回 cap（后面每帧从它 read）
+  │   ├─ open_camera()  ←common层     打开摄像头，返回 cap（后面每帧从它 read）
   │   ├─ make_backend()               建 YOLO 后端（eye_yolo26n + gaze5_yolo26s）
   │   └─ print(...)                   启动提示
   │
@@ -56,6 +57,9 @@ from PIL import Image, ImageDraw, ImageFont
 # 本项目各脚本独立运行（没有包结构），把 src/ 加进搜索路径以引入 YOLO 后端
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vision.yolo_backend import YoloEyeGaze, draw_eye_boxes, flip_box  # noqa: E402  ← 在 sys.path 之后导入
+from common.camera_utils import open_camera  # noqa: E402  ← 共用层（src/common/）
+from common.draw_utils import chinese_font  # noqa: E402
+from common.paths import PROJECT_ROOT  # noqa: E402
 
 # ---- 运行参数 ----
 CAMERA_INDEX = 0
@@ -63,15 +67,8 @@ WIDTH, HEIGHT = 960, 540
 KEY_DEBOUNCE_SECONDS = 0.25   # 两次按键响应的最小间隔：按住不放时不再连发
 
 # ---- 路径与窗口 ----
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SNAPSHOT_DIR = PROJECT_ROOT / "data" / "yolo_snapshots"
 WINDOW_NAME = "YOLO Eye & Gaze | Q quit | S snapshot"
-# 中文字体逐个探测：msyh 缺失时回退，换机器不会直接崩
-FONT_CANDIDATES = (
-    Path(r"C:\Windows\Fonts\msyh.ttc"),
-    Path(r"C:\Windows\Fonts\simhei.ttf"),
-    Path(r"C:\Windows\Fonts\arial.ttf"),
-)
 
 # 类别 → 中文（与 Yolo_model/scripts/test_gaze_live.py 同款）
 EYE_ZH = {"open_eye": "睁眼", "closed_eye": "闭眼"}
@@ -95,25 +92,8 @@ def stamp(now: float) -> str:
     return time.strftime("%Y%m%d_%H%M%S", time.localtime(now)) + f"_{int(now % 1 * 1000):03d}"
 
 
-_font_cache: dict[tuple[Path, int], "ImageFont.FreeTypeFont"] = {}
 
 
-def chinese_font(size: int):
-    """按 FONT_CANDIDATES 找到第一个可用字体并缓存，避免每帧重复读字体文件。
-
-    调用关系：被 draw_labels() 和 draw_status_bar() 调用；第一次读文件后命中缓存。
-    """
-    for path in FONT_CANDIDATES:
-        if not path.exists():
-            continue
-        cached = _font_cache.get((path, size))
-        if cached is None:
-            cached = ImageFont.truetype(str(path), size)
-            _font_cache[(path, size)] = cached
-        return cached
-    raise FileNotFoundError(
-        "找不到可用的中文字体，请检查 FONT_CANDIDATES：" + "、".join(str(p) for p in FONT_CANDIDATES)
-    )
 
 
 def _pil_layer(frame, items):
@@ -171,19 +151,6 @@ def save_snapshot(frame_display: np.ndarray, now: float) -> Path:
 # ============================ 2) 摄像头与后端 ============================
 
 
-def open_camera() -> cv2.VideoCapture:
-    """打开摄像头并设置画面宽高；打不开时报一句中文提示。
-
-    调用关系：被 main() 在启动时调用一次，返回的 cap 会一路传给 read_and_detect()。
-    """
-    cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        cap = cv2.VideoCapture(CAMERA_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
-    if not cap.isOpened():
-        raise RuntimeError("摄像头无法打开，请关闭占用摄像头的软件后重试。")
-    return cap
 
 
 def make_backend() -> YoloEyeGaze:
@@ -251,7 +218,7 @@ def pressed_key(now: float, key_available_at: float):
 
 def main() -> None:
     """程序入口：建好摄像头和 YOLO 后端，每帧走一遍 看→画→控。"""
-    cap = open_camera()                    # ① 打开摄像头
+    cap = open_camera(CAMERA_INDEX, WIDTH, HEIGHT)                    # ① 打开摄像头
     backend = make_backend()               # ② 建 YOLO 后端
     key_available_at = 0.0                 # 按键防抖
     chinese_font(20)                       # ③ 提前加载字体，字体缺失时立刻报错

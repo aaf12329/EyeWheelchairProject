@@ -51,11 +51,27 @@ EyeWheelchairProject/
 ├─ models/                            MediaPipe 模型文件（face / hand landmarker，已入库）
 ├─ data/                              录制素材（raw_videos / snapshots）
 ├─ requirements.md                    依赖清单
+├─ GIT_GUIDE.md                       组员 Git 上手指南（分支规则 / 日常循环 / 提交格式）
 └─ README.md
 ```
 
 五个演示脚本各自独立可运行（按周推进的开发顺序保留下来，方便逐步验证）。唯一的跨文件依赖是
 第 5 步 → `src/hardware/serial_link.py`（串口输出层），且默认以模拟模式运行。
+
+## 协作与分支（2026-09-30 起）
+
+多人协作启动，分支规则如下：
+
+| 分支 | 用途 | 规则 |
+|---|---|---|
+| `main` | 主干 | 由所有者维护与合并，**组员不要直接 push** |
+| `huang` / `chen` | 组员开发分支 | 一人一分支，**只推自己的分支** |
+
+- **组员上手**：先读 [GIT_GUIDE.md](GIT_GUIDE.md)（一次性配置、克隆、每日循环、
+  提交信息格式、入库红线、问题急救、速查表），10 分钟可开工。
+- **提交信息**：沿用本仓库惯例——`CH:` / `EN:` 双语、中文在前、一行说清做了什么。
+- **干完活**：push 自己分支 → 所有者审核后合并进 main（`git switch main && git merge huang`）。
+- **红线**：虚拟环境（`myvenv/` 等）、密钥、大体积原始数据永不入库（见 `.gitignore`）。
 
 ## 代码组织
 
@@ -267,10 +283,25 @@ EyeWheelchairProject/
 ├─ models/                            MediaPipe model files (face / hand landmarker, checked in)
 ├─ data/                              Recorded materials (raw_videos / snapshots)
 ├─ requirements.md                    Dependency list
+├─ GIT_GUIDE.md                       Teammate Git onboarding guide (branch rules / daily loop / commit format)
 └─ README.md
 ```
 
 The five demo scripts run independently (the weekly development order is preserved for gradual verification). The only cross-file dependency is step 5 → `src/hardware/serial_link.py` (serial output layer), which itself runs in simulated mode by default.
+
+## Collaboration and Branches (since 2026-09-30)
+
+Multi-contributor collaboration has started, with the following branch rules:
+
+| Branch | Purpose | Rule |
+|---|---|---|
+| `main` | Trunk | Maintained and merged by the owner — **members do not push directly** |
+| `huang` / `chen` | Per-member dev branches | One branch per member; **push only your own branch** |
+
+- **New members**: read [GIT_GUIDE.md](GIT_GUIDE.md) first (one-time setup, clone, daily loop, commit message format, red lines, first aid, cheat sheet) — 10 minutes and you can start.
+- **Commit messages** keep this repo's convention: `CH:` / `EN:` bilingual, Chinese first, one line saying what changed.
+- **When done**: push your branch → the owner reviews and merges into main (`git switch main && git merge huang`).
+- **Red lines**: virtualenvs (`myvenv/` etc.), secrets and large raw data files never get committed (see `.gitignore`).
 
 ## Code Organization
 

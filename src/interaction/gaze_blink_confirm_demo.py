@@ -9,7 +9,7 @@ src/hardware/serial_link.py 发给固件（含 1 秒心跳、电池回报、低�
 本版把 MediaPipe 关键点几何判定整体换成了 YOLO26 眼动模型
 （Yolo_model 项目交付：eye_yolo26n.pt 睁/闭眼 2 类 + gaze5_yolo26s.pt 注视 5 类）：
   旧链路：MediaPipe 478 点 → EAR 开合比 + 虹膜位置 → 双状态机
-  新链路：Haar 定位眼睛 → 裁剪 → YOLO 双模型 → 睁眼置信度 + 水平注视信号 → 原状态机
+  新链路：YuNet 定位眼睛 → 裁剪 → YOLO 双模型 → 睁眼置信度 + 水平注视信号 → 原状态机
 GazeBlinkDetector 四状态机（校准/选择/等待眨眼/确认）逻辑没变，只是信号来源换了；
 校准保留：它吸收模型置信度在当前摄像头/光照下的偏置。
 动作语义沿用 Yolo_model 实测约定：模型输出 look_left/look_right 在【未镜像帧】上

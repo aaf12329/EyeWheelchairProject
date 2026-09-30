@@ -1,4 +1,4 @@
-"""YOLO 眼动后端：眼部定位（OpenCV Haar 级联）+ 双模型推理（睁闭眼 / 5 类注视）。
+"""YOLO 眼动后端：眼部定位（OpenCV YuNet）+ 双模型推理（睁闭眼 / 5 类注视）。
 
 把 MediaPipe 的"关键点几何判定"整体换成 Yolo_model 项目训练的两个 YOLO26 模型：
   eye_yolo26n.pt   2 类：open_eye / closed_eye（眼部裁剪小图 → 检测框）
@@ -7,17 +7,19 @@
 ⚠️ 两条铁律（沿用 Yolo_model 项目 test_gaze_live.py 的实测结论）：
   1. analyze() 只吃【未镜像帧】——镜像会把"看左/看右"反转；镜像只用于显示层。
      （接口上不强制：你传镜像帧它也跑，但左右语义就是反的。）
-  2. 两个模型都吃【眼部裁剪小图】，不吃整幅画面 —— 所以后端先用 Haar 级联
-     在整帧里定位人脸与眼睛，再按训练同款扩边（x1.6 / y2.2）裁出小图。
+  2. 两个模型都吃【眼部裁剪小图】，不吃整幅画面 —— 所以后端先用 YuNet
+     （OpenCV 自带 FaceDetectorYN，权重在 models/face_detection_yunet_2023mar.onnx）
+     定位人脸与双眼中心，再按训练同款比例裁出小图。
 
 诚实的已知边界（写在最前面，免得后面忘记）：
-  - 训练时的眼部框来自 MediaPipe 关键点，现在换成 Haar 级联框，裁剪分布略有差异；
+  - 训练时的眼部框来自 MediaPipe 关键点外接框（6 点 × 扩边 1.6/2.2），现在换成
+    "YuNet 眼中心 + 按人脸框比例取框"，中心一致、尺寸近似（两个比例常量可调）；
   - 所有者实测：YOLO 在训练域 95%+，换机器/换摄像头会明显下降（域差距）。
     所以后端把置信度原样交给上层，低置信度的处理（不判定/不候选）由状态机与界面决定。
 
 文件分三段：
   1) 数据模型与纯逻辑（信号换算、双眼合并 —— 可单独跑测试）
-  2) 模型加载与推理（Haar 定位 + ultralytics 推理）
+  2) 模型加载与推理（YuNet 定位 + ultralytics 推理）
   3) 便捷工具（给显示层用的坐标翻转）
 
 ============================ 调用关系总览 ============================
@@ -25,11 +27,11 @@
   交互脚本（blink_preview / gaze_direction_preview / gaze_blink_confirm_demo）
   │
   ├─ 启动阶段（只执行一次）
-  │   └─ YoloEyeGaze(eye_weights, gaze_weights)     建后端：加载 2 个 YOLO + 2 个 Haar 级联
+  │   └─ YoloEyeGaze(eye_weights, gaze_weights)     建后端：加载 2 个 YOLO + YuNet 人脸定位
   │
   └─ 每帧循环（★ 每帧都执行）
       ├─★ backend.analyze(frame_raw)               ← 唯一入口：吃【未镜像】BGR 帧
-      │    ├─ _locate_eyes(frame)                  Haar：人脸 → 眼睛（带扩边）
+      │    ├─ _locate_eyes(frame)                  YuNet：人脸框 + 双眼中心 → 裁剪框
       │    ├─ _top_pred(eye_model, crop)           睁/闭眼（top 类别 + 置信度）
       │    ├─ _top_pred(gaze_model, crop)          5 类注视（同上）
       │    └─ combine(per_eye)                     双眼合并（一致取之 / 不一致取高置信）
@@ -49,11 +51,14 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EYE_WEIGHTS = PROJECT_ROOT / "models" / "eye_yolo26n.pt"
 DEFAULT_GAZE_WEIGHTS = PROJECT_ROOT / "models" / "gaze5_yolo26s.pt"
+DEFAULT_YUNET = PROJECT_ROOT / "models" / "face_detection_yunet_2023mar.onnx"
 
 # ---- 推理参数（与 Yolo_model/scripts 的 live / eval 同款）----
 IMGSZ = 128          # 训练时的输入尺寸，推理必须一致
 CONF_THRESHOLD = 0.30  # 检测框置信度下限（eval 用 0.50；live 放宽一些，低置信交给上层处理）
-EXPAND_X, EXPAND_Y = 1.6, 2.2   # 眼部裁剪扩边（与训练数据同款）
+FACE_SCORE_THRESHOLD = 0.60  # YuNet 人脸置信度下限
+EYE_CROP_W_RATIO = 0.48  # 眼部裁剪宽 ≈ 人脸框宽的比例（近似训练分布，可调）
+EYE_CROP_H_RATIO = 0.20  # 眼部裁剪高 ≈ 人脸框高的比例（同上）
 MIN_CROP_PX = 16     # 裁剪太小没有意义（训练数据里不存在这种图）
 
 # 水平注视信号：左 0 / 中 0.5 / 右 1；上下两态在水平轴上归中（与旧虹膜几何等价：上看时虹膜水平居中）
@@ -74,12 +79,12 @@ class EyeGazeResult:
     """一帧的推理结果快照，供状态机与界面消费。只是"数据袋子"，不含逻辑。
 
     字段语义：
-      face_found  Haar 有没有找到人脸（False 时其余字段全为 None/空）
+      face_found  FaceDetectorYN 有没有找到人脸（False 时其余字段全为 None/空）
       open_conf   睁眼信号 0~1：双眼平均"是睁眼"的置信度；闭眼时走低。
                   None = 这帧没有可用的眼部检测。直接喂 BlinkDetector.update()。
       gaze_label  双眼合并后的注视类别（look_left / look_center / ...），None = 不可用
       gaze_score  水平注视信号 0~1（左 0 / 中 0.5 / 右 1），直接喂方向状态机
-      eye_boxes   Haar 找到的眼睛框（未镜像帧坐标，画在镜像显示上要用 flip_box()）
+      eye_boxes   YuNet 定位出的眼部裁剪框（未镜像帧坐标，画在镜像显示上要用 flip_box()）
       per_eye     每只眼的 (眼类别, 眼置信度, 注视类别, 注视置信度)，调试用
     """
 
@@ -150,17 +155,17 @@ def _load_yolo(weights: Path):
     return YOLO(str(weights))
 
 
-def _load_cascade(name: str):
-    """加载一个 Haar 级联（opencv-python 自带，不需要额外安装）。"""
-    path = Path(cv2.data.haarcascades) / name
-    cascade = cv2.CascadeClassifier(str(path))
-    if cascade.empty():
-        raise RuntimeError(f"Haar 级联加载失败：{path}")
-    return cascade
+def _check_yunet(path: Path) -> Path:
+    """确认 YuNet 权重存在（FaceDetectorYN 是 OpenCV 自带 API，不需要额外安装）。"""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"缺少 YuNet 模型：{path}（OpenCV 5 已移除 Haar 级联，本仓库统一用 YuNet 定位人脸）"
+        )
+    return path
 
 
 class YoloEyeGaze:
-    """眼动后端：Haar 定位眼睛 → 裁剪 → 双 YOLO 推理 → 合并成信号。
+    """眼动后端：YuNet 定位眼睛 → 裁剪 → 双 YOLO 推理 → 合并成信号。
 
     调用关系：交互脚本在启动时 new 一个（读模型慢，绝不能放进循环）；
     之后每帧调 analyze(frame_raw)，只拿 EyeGazeResult，不碰内部状态。
@@ -171,6 +176,7 @@ class YoloEyeGaze:
         self,
         eye_weights: Path = DEFAULT_EYE_WEIGHTS,
         gaze_weights: Path = DEFAULT_GAZE_WEIGHTS,
+        yunet_path: Path = DEFAULT_YUNET,
         *,
         imgsz: int = IMGSZ,
         conf: float = CONF_THRESHOLD,
@@ -179,47 +185,36 @@ class YoloEyeGaze:
         self._imgsz = imgsz
         self._conf = conf
         self._device = device
+        self._yunet_path = _check_yunet(yunet_path)
         self._eye_model = _load_yolo(eye_weights)
         self._gaze_model = _load_yolo(gaze_weights)
-        self._face_cascade = _load_cascade("haarcascade_frontalface_default.xml")
-        self._eye_cascade = _load_cascade("haarcascade_eye.xml")
 
     # ---- 定位 ----
 
-    def _locate_eyes(self, frame: np.ndarray) -> list[tuple[int, int, int, int]]:
-        """整帧 → 眼睛框列表（未镜像坐标）。找不到人脸时退回全帧找眼睛。
+    def _locate_eyes(self, frame: np.ndarray) -> list[tuple[tuple[int, int, int, int], tuple[int, int, int, int]]]:
+        """整帧 → [(眼部裁剪框, 所在人脸框), ...]（未镜像坐标）。
 
-        调用关系：只被 analyze() 调用。 Haar 的输入是灰度图（内部做直方图均衡）。
+        调用关系：只被 analyze() 调用。YuNet 一次给出人脸框与双眼中心，
+        裁剪框 = 以眼中心为中心、按人脸框比例取的近似训练分布框。
         """
-        gray = cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-        faces = self._face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
-        eye_boxes: list[tuple[int, int, int, int]] = []
-        if len(faces):
-            # 取最大的人脸（驾驶员应该只有一个），在人脸的上半部分找眼睛
-            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-            roi_gray = gray[y:y + int(h * 0.6), x:x + w]
-            eyes = self._eye_cascade.detectMultiScale(roi_gray, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24))
-            eye_boxes = [(x + ex, y + ey, ew, eh) for (ex, ey, ew, eh) in eyes]
-        else:
-            eyes = self._eye_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24))
-            eye_boxes = [(ex, ey, ew, eh) for (ex, ey, ew, eh) in eyes]
-        # 最多保留两只（左/右各一），按框面积取大——多框是 Haar 的常态
-        eye_boxes = sorted(eye_boxes, key=lambda b: b[2] * b[3], reverse=True)[:2]
-        return eye_boxes
-
-    @staticmethod
-    def _expand_crop(frame: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray | None:
-        """眼睛框 → 训练同款扩边裁剪（x1.6 / y2.2，最小 16px），超出画面部分截断。"""
         h, w = frame.shape[:2]
-        x, y, bw, bh = box
-        cx, cy = x + bw / 2, y + bh / 2
-        half_w = max(bw / 2 * EXPAND_X, 12)
-        half_h = max(bh / 2 * EXPAND_Y, 12)
-        x0, y0 = max(0, int(cx - half_w)), max(0, int(cy - half_h))
-        x1, y1 = min(w, int(cx + half_w)), min(h, int(cy + half_h))
-        if x1 - x0 < MIN_CROP_PX or y1 - y0 < MIN_CROP_PX:
-            return None
-        return frame[y0:y1, x0:x1]
+        detector = cv2.FaceDetectorYN_create(str(self._yunet_path), "", (w, h),
+                                             score_threshold=FACE_SCORE_THRESHOLD)
+        ok, faces = detector.detect(frame)
+        if not ok or faces is None or not len(faces):
+            return []
+        # 取最大的人脸（驾驶员应该只有一个）
+        x, y, fw, fh = max((f for f in faces), key=lambda f: f[2] * f[3])[:4]
+        boxes: list[tuple[tuple[int, int, int, int], tuple[int, int, int, int]]] = []
+        # faces 行的第 4~7 列是右眼、左眼的中心点（像素坐标）
+        for eye_index in (4, 6):
+            cx, cy = float(faces[0][eye_index]), float(faces[0][eye_index + 1])
+            half_w, half_h = fw * EYE_CROP_W_RATIO / 2, fh * EYE_CROP_H_RATIO / 2
+            x0, y0 = max(0, int(cx - half_w)), max(0, int(cy - half_h))
+            x1, y1 = min(w, int(cx + half_w)), min(h, int(cy + half_h))
+            if x1 - x0 >= MIN_CROP_PX and y1 - y0 >= MIN_CROP_PX:
+                boxes.append(((x0, y0, x1, y1), (int(x), int(y), int(fw), int(fh))))
+        return boxes
 
     # ---- 推理 ----
 
@@ -236,24 +231,23 @@ class YoloEyeGaze:
         """吃一帧【未镜像】BGR 画面，返回 EyeGazeResult。每帧调用一次。
 
         调用关系：被交互脚本的 read_frame() 每帧调用；内部调用 _locate_eyes()、
-        _expand_crop()、_top_pred()、eye_open_confidence()、combine()、gaze_signal()。
+        _top_pred()、eye_open_confidence()、combine()、gaze_signal()。
         """
         if frame is None:
             return EyeGazeResult(False, None, None, None, (), ())
-        eye_boxes = self._locate_eyes(frame)
-        if not eye_boxes:
+        located = self._locate_eyes(frame)
+        if not located:
             return EyeGazeResult(False, None, None, None, (), ())
 
         per_eye: list[tuple[str | None, float, str | None, float]] = []
         kept_boxes: list[tuple[int, int, int, int]] = []
-        for box in eye_boxes:
-            crop = self._expand_crop(frame, box)
-            if crop is None:
-                continue
+        for crop_box, _face in located:
+            x0, y0, x1, y1 = crop_box
+            crop = frame[y0:y1, x0:x1]
             eye_label, eye_conf = self._top_pred(self._eye_model, crop)
             gaze_label, gaze_conf = self._top_pred(self._gaze_model, crop)
             per_eye.append((eye_label, eye_conf, gaze_label, gaze_conf))
-            kept_boxes.append(box)
+            kept_boxes.append(crop_box)
 
         eye_label, eye_conf = combine([(e, c) for e, c, _, _ in per_eye])
         gaze_label, _ = combine([(g, c) for _, _, g, c in per_eye])

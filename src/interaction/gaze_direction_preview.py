@@ -8,7 +8,7 @@
 本版把 MediaPipe 虹膜几何判定整体换成了 YOLO26 注视模型
 （models/gaze5_yolo26s.pt，5 类：上/中/下/左/右，由 Yolo_model 项目训练交付）：
   旧链路：MediaPipe 478 点 → 虹膜水平位置 score → 阈值判定
-  新链路：Haar 定位眼睛 → 裁剪 → YOLO 判 5 类 → 左0/中0.5/右1 当"score" → 原状态机
+  新链路：YuNet 定位眼睛 → 裁剪 → YOLO 判 5 类 → 左0/中0.5/右1 当"score" → 原状态机
 GazeDirectionDetector 状态机（校准/稳定停留/候选）逻辑没变，只是信号来源换了；
 校准保留：它吸收分类器在当前摄像头下的偏置（比如你正视时模型总偏一点）。
 

@@ -7,7 +7,7 @@
 本版把 MediaPipe 关键点几何判定整体换成了 YOLO26 眼动模型
 （models/eye_yolo26n.pt，睁/闭眼 2 类，由 Yolo_model 项目训练交付）：
   旧链路：MediaPipe 478 点 → EAR 开合比 → 阈值判定
-  新链路：Haar 定位眼睛 → 裁剪 → YOLO 判睁/闭 → 睁眼置信度当"开合值" → 原状态机
+  新链路：YuNet 定位眼睛 → 裁剪 → YOLO 判睁/闭 → 睁眼置信度当"开合值" → 原状态机
 BlinkDetector 状态机（校准/计数/不应期）一行没改，只是喂进来的信号换了来源；
 置信度是连续值，旧的三帧平滑与两条判定线照常工作。校准保留：它让阈值
 适配当前摄像头与光照（模型置信度会随场景漂移）。
@@ -27,7 +27,7 @@ BlinkDetector 状态机（校准/计数/不应期）一行没改，只是喂进�
   ├─ 启动阶段（每个都只执行一次）
   │   ├─ open_camera()                  打开摄像头，返回 cap（后面每帧从它 read）
   │   ├─ make_backend()                 建 YOLO 后端：加载 eye_yolo26n + gaze5 权重
-  │   │    └─ vision.yolo_backend.YoloEyeGaze()   （Haar 定位 + 双模型推理都在里面）
+  │   │    └─ vision.yolo_backend.YoloEyeGaze()   （YuNet 定位 + 双模型推理都在里面）
   │   ├─ BlinkDetector(program_started_at)   建眨眼状态机，校准从此刻开始计时
   │   │    └─ self.reset(now)           把所有状态置位（按 C 重新校准时走的也是它）
   │   └─ chinese_font(20)               预加载中文字体，缺字体时立刻报错

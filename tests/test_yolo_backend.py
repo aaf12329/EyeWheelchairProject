@@ -11,6 +11,7 @@ from vision.yolo_backend import (
     DEFAULT_EYE_WEIGHTS,
     DEFAULT_GAZE_WEIGHTS,
     EyeGazeResult,
+    YoloEyeGaze,
     combine,
     eye_open_confidence,
     flip_box,
@@ -85,9 +86,7 @@ def _backend_or_skip():
 
 
 def test_backend_runs_on_synthetic_blank_frame():
-    """全黑画面走一遍完整链路：Haar 找不到脸 → 返回空结果，不抛异常。"""
-    from vision.yolo_backend import YoloEyeGaze
-
+    """全黑画面走一遍完整链路：YuNet 找不到脸 → 返回空结果，不抛异常。"""
     backend = _backend_or_skip()
     blank = np.zeros((540, 960, 3), dtype=np.uint8)
     result = backend.analyze(blank)
@@ -99,7 +98,7 @@ def test_backend_runs_on_synthetic_blank_frame():
 
 
 def test_backend_result_is_dense_on_noise_frame():
-    """随机噪声画面同样不崩（Haar 可能误检，但结果结构必须完整可用）。"""
+    """随机噪声画面同样不崩（YuNet 可能误检，但结果结构必须完整可用）。"""
     rng = np.random.default_rng(42)
     noise = rng.integers(0, 255, size=(540, 960, 3), dtype=np.uint8)
     backend = _backend_or_skip()

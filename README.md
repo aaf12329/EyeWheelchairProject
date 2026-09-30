@@ -41,7 +41,7 @@ EyeWheelchairProject/
 │  ├─ camera/
 │  │  └─ camera_preview.py            第 1 周：摄像头基线（预览 / 录像 / 截图）
 │  ├─ vision/
-│  │  ├─ yolo_backend.py              YOLO 眼动后端：Haar 定位眼睛 + 双模型推理 + 信号换算
+│  │  ├─ yolo_backend.py              YOLO 眼动后端：YuNet 定位眼睛 + 双模型推理 + 信号换算
 │  │  └─ yolo_preview.py              第 2 周（YOLO 版）：睁/闭眼 + 5 类注视检测可视化
 │  └─ interaction/
 │     ├─ blink_preview.py             第 3 步：眨眼校准与计数（已重构，含测试）
@@ -209,7 +209,7 @@ Python 端的串口输出层也已落地：`src/hardware/serial_link.py`
    换机器/换摄像头会明显下降 —— 表现为候选不出、眨眼不计数，而不是报错。
    排查顺序：先跑 `src/vision/yolo_preview.py` 看裸输出（框稳不稳、类别对不对），
    再调 `src/vision/yolo_backend.py` 顶部的 `CONF_THRESHOLD`（当前 0.30）。
-   另：眼部定位从训练时的 MediaPipe 关键点框换成了 Haar 级联框，裁剪分布略有差异。
+   另：眼部定位从训练时的 MediaPipe 关键点框换成了 YuNet 眼中心 + 人脸框比例取框，中心一致、尺寸近似（比例常量可调）。
    （旧版"MediaPipe 退出卡 42 秒"的问题随 MediaPipe 移除一并消失。）
 2. **`camera_preview.py` 尚未实机完整验证**：它由另一版重构完成（不是本次统一套路），
    使用前请先跑一遍预览 / 录像 / 截图，确认与旧版行为一致。
@@ -283,7 +283,7 @@ EyeWheelchairProject/
 │  ├─ camera/
 │  │  └─ camera_preview.py            Week 1: Camera baseline (preview / record / snapshot)
 │  ├─ vision/
-│  │  ├─ yolo_backend.py              YOLO eye backend: Haar localization + two-model inference + signal mapping
+│  │  ├─ yolo_backend.py              YOLO eye backend: YuNet localization + two-model inference + signal mapping
 │  │  └─ yolo_preview.py              Week 2 (YOLO): open/closed + 5-class gaze detection visualization
 │  └─ interaction/
 │     ├─ blink_preview.py             Step 3: Blink calibration and counting (refactored, with tests)
@@ -439,7 +439,7 @@ actually go out to the firmware.
 
 1. **YOLO domain gap (honest statement, measured in the Yolo_model project)**: the eye models score 95%+ in their training domain but degrade noticeably on other machines/cameras — the symptom is "no candidate, no blink counted", not an error.
    Troubleshooting order: run `src/vision/yolo_preview.py` first to see the raw output (are boxes stable, labels correct), then tune `CONF_THRESHOLD` at the top of `src/vision/yolo_backend.py` (currently 0.30).
-   Also: eye localization switched from the MediaPipe keypoint boxes used in training to Haar cascade boxes, so the crop distribution differs slightly.
+   Also: eye localization switched from the MediaPipe keypoint boxes used in training to YuNet eye centers with face-box-proportional crops — same centers, approximately matched sizes (ratios tunable).
    (The old "MediaPipe takes 42 s to exit" problem disappeared together with MediaPipe.)
 2. **`camera_preview.py` is not fully verified on the real machine**: it was refactored in a separate pass (not the unified pattern). Run preview / record / snapshot once before relying on it, and confirm the behaviour matches the old version.
 3. **Dependencies are not version-locked**: `requirements.md` lists no version numbers, so another machine or an upgrade may hit API changes. The development environment measures mediapipe 1.0.1 + opencv 5.0.0; lock the versions before delivery.

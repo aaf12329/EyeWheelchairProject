@@ -54,6 +54,18 @@ git push                      # ⑤ 推到自己分支
 
 建议**小步提交**:一个逻辑单元一次 commit,别攒三天一起提。
 
+### 关于 push:只推"当前所在分支" ★
+
+`git push` 不带参数**只推当前所在的分支**,而且只推已经 commit 的历史
+(改了文件没 commit,push 完远程也不会有)。几种写法的区别:
+
+| 命令 | 推什么 |
+|---|---|
+| `git push` | 只推**当前分支**(前提:这个分支已经用 `-u` 设过上游) |
+| `git push -u origin huang` | 第一次推自己的分支;`-u` 设上游,之后光 `git push` 就行 |
+| `git push origin main huang chen` | 一条命令指定推多个分支(所有者合并时用) |
+| `git push --all origin` | 本地所有分支一次全推(慎用,先 `git branch -a` 确认都有什么) |
+
 ## 4. 提交信息怎么写 ★(中英双语,本仓库格式)
 
 一行说清"做了什么",中文在前,`CH:`/`EN:` 各一行:
@@ -108,6 +120,7 @@ git commit
 | 切分支 | `git switch 分支名` |
 | 新建并切换 | `git switch -c 新分支名` |
 | 把 main 最新合进自己分支 | `git switch huang && git merge main` |
-| 推自己分支(第一次) | `git push -u origin huang` |
+| 推自己分支(第一次,设上游) | `git push -u origin huang` |
+| 日常推送(已设过上游) | `git push` |
 | 撤销最近一次 commit(保留改动) | `git reset --soft HEAD~1` |
 | 丢弃某文件未提交的改动 | `git restore 文件名` |

@@ -231,8 +231,10 @@ Python 端的串口输出层也已落地：`src/hardware/serial_link.py`
 1. **实机完整验证 `camera_preview.py`**：重构版还没完整跑过，用之前先测预览 / 录像 / 截图三项。
 2. **补常驻测试**：`tests/` 已覆盖第 3 步（眨眼）、串口层与界面渲染；第 4 步（视线方向）的行为
    验证仍是一次性脚本，可照 `test_serial_link.py` 的样子落成常驻用例。
-3. **抽公共部分**：打开摄像头、构建检测器、中文绘制在五个脚本里各有一份拷贝，改一处要同步五处，
-   是下一个该消除的重复。
+3. **抽公共部分**：打开摄像头、构建检测器、中文绘制在五个脚本里各有一份拷贝，改一处要同步五处。
+   → **已在 `chen` 分支完成（2026-09-29）**：新增 `src/common/` 共用层（`paths.py` 路径地址簿 +
+   `camera_utils.open_camera()` + `draw_utils.chinese_font/draw_text()`），5 个脚本去重、净减 143 行；
+   **合并 chen 后 main 一并获得**（main 自身尚未引入）。
 4. **台架验证 `firmware/wheelchair_controller.ino`**：按文件底部 7 条清单逐项过
    （接线核对 → PWM 噪音/温度 → 看门狗 → 长跑 → 转向先停 → 低电模拟 → 电压对表），
    全过后加装物理急停按钮。
@@ -439,6 +441,7 @@ These three are the current, real boundaries of the system and are "known, delib
 
 1. **Fully verify `camera_preview.py` on the real machine**: the refactored version has never been run end to end — test preview / record / snapshot first.
 2. **Add permanent tests**: `tests/` now covers step 3 (blink), the serial layer and UI rendering; the step 4 (gaze direction) behaviour checks are still one-off scripts and could be turned into permanent cases like `test_serial_link.py`.
-3. **Extract the common parts**: opening the camera, building detectors and drawing Chinese text are copied in all five scripts, so one change means five edits — the next duplication to remove.
+3. **Extract the common parts**: opening the camera, building detectors and drawing Chinese text are copied in all five scripts, so one change means five edits.
+   → **Done on the `chen` branch (2026-09-29)**: new `src/common/` shared layer (`paths.py` registry + `camera_utils.open_camera()` + `draw_utils.chinese_font/draw_text()`); five scripts deduplicated, -143 lines. **Merging `chen` brings it into `main`** (main itself does not have it yet).
 4. **Bench-verify `firmware/wheelchair_controller.ino`**: work through the 7-item checklist at the end of the file (wiring check → PWM noise/temperature → watchdog → long run → stop-before-turn → low-battery simulation → voltage cross-check); then add a physical e-stop button.
 5. **On-device integration of the serial layer**: plug in the Arduino, set `ENABLE_HARDWARE = True` with the right port in `gaze_blink_confirm_demo.py`, and verify the three chains — heartbeat keep-alive, `GET_DATA` battery replies, and forced stop on low battery.

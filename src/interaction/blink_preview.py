@@ -1,13 +1,24 @@
-"""第 3 步：眨眼校准与计数，仅用于视觉交互验证。
+"""第 3 步：眨眼检测与计数（YOLO 版），仅用于视觉交互验证。
 
 启动后保持睁眼看向摄像头约 3 秒。完成校准后，每完成一次自然眨眼，
 屏幕上的眨眼次数会加一。此程序不会输出任何轮椅或 Arduino 指令。
 按 Q 退出，按 C 重新校准。
 
+本版把 MediaPipe 关键点几何判定整体换成了 YOLO26 眼动模型
+（models/eye_yolo26n.pt，睁/闭眼 2 类，由 Yolo_model 项目训练交付）：
+  旧链路：MediaPipe 478 点 → EAR 开合比 → 阈值判定
+  新链路：Haar 定位眼睛 → 裁剪 → YOLO 判睁/闭 → 睁眼置信度当"开合值" → 原状态机
+BlinkDetector 状态机（校准/计数/不应期）一行没改，只是喂进来的信号换了来源；
+置信度是连续值，旧的三帧平滑与两条判定线照常工作。校准保留：它让阈值
+适配当前摄像头与光照（模型置信度会随场景漂移）。
+
+⚠️ 铁律：YOLO 推理只吃【未镜像帧】（镜像会把左右反转），镜像只用于显示层——
+   所以 read_frame() 先 analyze 原始帧，再翻转到显示。详见 vision/yolo_backend.py。
+
 文件分三段：
-  1) 眨眼判定（纯逻辑，只吃数字，不碰摄像头）—— 可以单独跑测试
-  2) 摄像头与画面（打开设备、建检测器、画中文字）
-  3) 主流程 main()：读帧 → 量开合值 → 交给判定 → 画 → 按键
+  1) 眨眼判定（纯逻辑，只吃数字，不碰摄像头）—— 可以单独跑测试（与旧版完全一致）
+  2) 摄像头与画面（打开设备、建 YOLO 后端、画中文字）
+  3) 主流程 main()：读帧 → YOLO 推理 → 交给判定 → 画 → 按键
 
 ============================ 调用关系总览 ============================
 
@@ -15,22 +26,20 @@
   │
   ├─ 启动阶段（每个都只执行一次）
   │   ├─ open_camera()                  打开摄像头，返回 cap（后面每帧从它 read）
-  │   ├─ face_detector()                建识别器：加载 models/face_landmarker.task
-  │   │    └─ MediaPipe: FaceLandmarker.create_from_options()
+  │   ├─ make_backend()                 建 YOLO 后端：加载 eye_yolo26n + gaze5 权重
+  │   │    └─ vision.yolo_backend.YoloEyeGaze()   （Haar 定位 + 双模型推理都在里面）
   │   ├─ BlinkDetector(program_started_at)   建眨眼状态机，校准从此刻开始计时
   │   │    └─ self.reset(now)           把所有状态置位（按 C 重新校准时走的也是它）
   │   └─ chinese_font(20)               预加载中文字体，缺字体时立刻报错
   │
   ├─ 每帧循环（下面的 ★ 每帧都执行；五步顺序 看→量→判→报→控）
-  │   ├─★ read_frame(cap, detector, program_started_at)
-  │   │    ├─ cap.read() / cv2.flip / cv2.cvtColor     取一帧并做预处理
-  │   │    ├─ detector.detect_for_video(图, 毫秒时间戳)  ← MediaPipe 推理
-  │   │    └─ 返回 (frame, now, landmarks 或 None)
-  │   ├─★ draw_eye_points(frame, landmarks)            画出 12 个眼球点（只为肉眼检查）
-  │   ├─★ average_ear(landmarks)                       把 478 个点换算成一个数 ear
-  │   │    ├─ eye_aspect_ratio(lm, LEFT_EYE)  → distance() 量 4 段距离
-  │   │    └─ eye_aspect_ratio(lm, RIGHT_EYE) → distance()
-  │   ├─★ blink.update(now, ear)                       核心判定（纯逻辑，可单测）
+  │   ├─★ read_frame(cap, backend)
+  │   │    ├─ cap.read()                             取【原始帧】（不镜像！）
+  │   │    ├─ backend.analyze(frame)                 ← YOLO 推理（未镜像帧，铁律）
+  │   │    ├─ cv2.flip(frame, 1)                     只为显示做镜像
+  │   │    └─ 返回 (显示帧, now, EyeGazeResult)
+  │   ├─★ draw_eye_boxes(显示帧, result, 宽)          画眼睛框（未镜像坐标经 flip_box 翻转）
+  │   ├─★ blink.update(now, result.open_conf)        ★核心判定（纯逻辑，与旧版一致）
   │   │    ├─ _update_calibration()   校准未完成时走这里；3 秒后写入 baseline
   │   │    ├─ _update_counting()      校准完成后走这里；眨眼计数在这里 +1
   │   │    └─ _status(ear) → BlinkStatus   把本帧结果打包返回
@@ -45,32 +54,36 @@
 
 数据在这些函数之间是怎么流动的：
 
-  摄像头画面 ──read_frame──▶ landmarks（478 个点）
-  landmarks ──average_ear──▶ ear（一个浮点数，眼睛张开的程度）
-  ear + 当前时间 ──blink.update──▶ BlinkStatus（计数值 / 状态文字 / 基线 / 提示语）
+  摄像头原始帧 ──backend.analyze──▶ open_conf（0~1，闭眼走低的连续信号）
+  open_conf + 当前时间 ──blink.update──▶ BlinkStatus（计数值 / 状态文字 / 基线 / 提示语）
   BlinkStatus ──show_status──▶ 屏幕左上角的四行中文
+
+（旧版 MediaPipe 的 42 秒退出卡顿随关键点检测一起移除了：torch 模型进程可正常回收。）
 """
-from collections import deque
 from dataclasses import dataclass
-import math
 from pathlib import Path
+import sys
 import time
+from collections import deque
 
 import cv2
-import mediapipe as mp
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+# 本项目各脚本独立运行（没有包结构），把 src/ 加进搜索路径以引入 YOLO 后端
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from vision.yolo_backend import YoloEyeGaze, draw_eye_boxes  # noqa: E402  ← 在 sys.path 之后导入
 
 
 #默认参数设定：
 #从第几个摄像头开
 #画面高、宽（先写死成固定值）
-#校准时长用前三秒去收集信息构建你的眼睛正常是什么样的，睁眼时多大闭眼时多大
+#校准时长用前三秒去收集信息构建你的眼睛正常是什么样的，睁眼时置信度多高闭眼时多低
 CAMERA_INDEX = 0
 WIDTH, HEIGHT = 960, 540
 CALIBRATION_SECONDS = 3.0     # 校准时长：这段时间内请保持睁眼
 CALIBRATION_MIN_SAMPLES = 10  # 样本下限：帧率过低时样本太少，基线不可靠
-CLOSE_RATIO = 0.78          # 放宽：低于睁眼基线的 78% 即进入闭眼候选
+CLOSE_RATIO = 0.78          # 低于睁眼基线的 78% 即进入闭眼候选
 REOPEN_RATIO = 0.88         # 高于睁眼基线的 88% 即认为重新睁眼
 SMOOTHING_FRAMES = 3        # 轻度平滑：保留自然眨眼的快速变化
 MIN_CLOSED_SECONDS = 0.04   # 过滤极短噪声
@@ -93,8 +106,7 @@ WELCOME_ART = (
 
 #path写法（里面全是路径）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-FACE_MODEL = PROJECT_ROOT / "models" / "face_landmarker.task"
-WINDOW_NAME = "Blink Detection | Q quit | C recalibrate | visual test only"
+WINDOW_NAME = "Blink Detection (YOLO) | Q quit | C recalibrate | visual test only"
 # 中文字体逐个探测：msyh 缺失时回退，换机器不会直接崩
 FONT_CANDIDATES = (
     Path(r"C:\Windows\Fonts\msyh.ttc"),
@@ -102,43 +114,10 @@ FONT_CANDIDATES = (
     Path(r"C:\Windows\Fonts\arial.ttf"),
 )
 
-# 每只眼睛：外眼角、上外、上内、内眼角、下内、下外。
-LEFT_EYE = [33, 160, 158, 133, 153, 144]
-RIGHT_EYE = [362, 385, 387, 263, 373, 380]
-#MediaPipe不会管你具体要什么，他只会输出摄像头信息里面的478个点
-#然后这几个点就是每个眼睛的外眼角、上外、上内、内眼角、下内、下外位置
-
 
 # ============================ 1) 眨眼判定（纯逻辑） ============================
-
-
-def distance(a, b) -> float:
-    """两个关键点之间的平面距离（忽略 z）。只被下面的 eye_aspect_ratio() 调用。"""
-    return math.hypot(a.x - b.x, a.y - b.y)
-
-
-def eye_aspect_ratio(landmarks, indices) -> float:
-    """单只眼睛的开合比：上下眼睑平均距离 ÷ 眼角宽度。闭眼时趋近 0。
-
-    调用关系：被 average_ear() 调用（左眼、右眼各一次）；
-    内部调用 distance() 量 4 段距离（两段上下眼睑、一段眼角宽度）。
-    """
-    p0, p1, p2, p3, p4, p5 = [landmarks[i] for i in indices]
-    horizontal = distance(p0, p3)
-    if horizontal < 1e-6:
-        return 0.0
-    return (distance(p1, p5) + distance(p2, p4)) / (2.0 * horizontal)
-
-
-def average_ear(landmarks) -> float:
-    """双眼平均开合比：取平均可以抵消轻微侧头带来的差异。
-
-    调用关系：被 main() 每帧调用一次；内部调用 eye_aspect_ratio() 两次。
-    产出的这个数（ear）就是后面所有判定唯一的输入。
-    """
-    left = eye_aspect_ratio(landmarks, LEFT_EYE)
-    right = eye_aspect_ratio(landmarks, RIGHT_EYE)
-    return (left + right) / 2.0
+# ★ 本段与 MediaPipe 版逐字一致（仅注释换口径）：状态机吃的是连续"睁眼信号"，
+#   信号来源从 EAR 开合比换成 YOLO 睁眼置信度，判定逻辑一行没动。
 
 
 @dataclass(frozen=True)
@@ -147,6 +126,8 @@ class BlinkStatus:
 
     调用关系：由 BlinkDetector._status() 产出 → 被 main() 接住 → 交给 show_status() 画出来。
     它只是"数据袋子"，自身不含任何逻辑。
+    字段说明：ear 字段名沿用旧版（测试与界面都引用它），YOLO 版里它装的是
+    "睁眼置信度"（0~1，闭眼走低）——对状态机来说两者是同一种连续信号。
     """
 
     blink_count: int
@@ -159,7 +140,7 @@ class BlinkStatus:
 
 
 class BlinkDetector:
-    """眨眼校准 + 计数状态机。原来散在 main() 里的状态，现在全在这个对象里。
+    """眨眼校准 + 计数状态机。与 MediaPipe 版逐字一致。
 
     调用关系：main() 在启动时 new 一个；之后每帧调 update()；
     按 C 时调 reset() 重新校准。update() 内部按阶段分派：
@@ -168,7 +149,7 @@ class BlinkDetector:
       两种情况都由 _status(ear) 打包成 BlinkStatus 返回。
 
     用法：`BlinkDetector(time.perf_counter())`，之后每帧调用
-    `update(now, 原始开合值)`；没检测到人脸时传 None。平滑、校准、阈值比较
+    `update(now, 睁眼置信度)`；没检测到眼睛时传 None。平滑、校准、阈值比较
     都在内部完成，外面只读返回的 BlinkStatus。
     """
 
@@ -194,17 +175,17 @@ class BlinkDetector:
         self._max_closed_seconds = max_closed_seconds
         self._min_open_seconds = min_open_seconds
         self._refractory_seconds = refractory_seconds
-        self._history: deque[float] = deque(maxlen=smoothing_frames)  # 最近几帧原始开合值，用于平滑
+        self._history: deque[float] = deque(maxlen=smoothing_frames)  # 最近几帧原始信号，用于平滑
         self.reset(now)
 
     def reset(self, now: float, message: str = MESSAGE_INITIAL) -> None:
-        """这里在进行初始化（还没有开始收集用户是否睁眼）。
+        """初始化/重新校准：把所有状态置位。
 
         调用关系：被 __init__（建对象时）和 main() 的 C 键分支调用，
         两条路走的是同一份代码，避免两处手抄不一致。
         """
         self._calibration_started_at = now  # 校准阶段的起始时间
-        self._calibration_values: list[float] = []  # 校准期间每帧的开合值
+        self._calibration_values: list[float] = []  # 校准期间每帧的信号值
         self._baseline: float | None = None  # 睁眼基线，校准完成前是 None
         self._close_threshold: float | None = None  # 闭眼判定线
         self._reopen_threshold: float | None = None  # 重新睁眼判定线
@@ -218,14 +199,14 @@ class BlinkDetector:
         self._message = message
 
     def update(self, now: float, ear_raw: float | None) -> BlinkStatus:
-        """吃一帧数据，返回本帧状态。ear_raw 为 None 表示这帧没检测到人脸。
+        """吃一帧数据，返回本帧状态。ear_raw 为 None 表示这帧没检测到眼睛。
 
         调用关系：被 main() 每帧调用一次；内部先做 3 帧平滑，再按阶段分派——
         校准没完成 → _update_calibration()；已完成 → _update_counting()；
         两个分支的最后都经 _status() 打包成 BlinkStatus 返回。
         """
         if ear_raw is None:
-            # 人脸消失期间的时序不可信，未完成的状态全部清空，人脸回来重新开始。
+            # 眼睛消失期间的时序不可信，未完成的状态全部清空，回来重新开始。
             self._history.clear()
             self._is_closed = False
             self._closed_since = None
@@ -248,6 +229,7 @@ class BlinkDetector:
 
         调用关系：只被 update() 调用，且只在 baseline 还是 None 时进入。
         写完之后 baseline 有了值，下一帧起 update() 就会改走 _update_counting()。
+        YOLO 版语义：基线是"当前场景下睁眼置信度"，它随摄像头/光照漂移，所以保留校准。
         """
         self._calibration_values.append(ear)
         elapsed = now - self._calibration_started_at
@@ -267,11 +249,7 @@ class BlinkDetector:
         self._state = "已准备好"
 
     def _update_counting(self, now: float, ear: float) -> None:
-        """收集数据完成后的计数状态机。
-
-        调用关系：只被 update() 调用，且只在 baseline 已有值时进入。
-        眨眼计数 +1 就发生在这里（下面那段 min ≤ duration ≤ max 的判断里）。
-        """
+        """收集数据完成后的计数状态机（与 MediaPipe 版逐字一致）。"""
         # 必须先记录“闭眼前是否已稳定睁眼”，再处理当前闭眼帧。
         # 否则一闭眼就会先清空 open_since，导致永远无法进入计数。
         was_stably_open = (
@@ -334,46 +312,24 @@ def open_camera() -> cv2.VideoCapture:
 
     调用关系：被 main() 在启动时调用一次，返回的 cap 会一路传给 read_frame()。
     """
-    #开摄像头(start)
     cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
     if not cap.isOpened():
         cap = cv2.VideoCapture(CAMERA_INDEX)
-    #设置画面高度和宽度
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
     if not cap.isOpened():
         raise RuntimeError("摄像头无法打开，请关闭占用摄像头的软件后重试。")
-    #开摄像头(stop)
     return cap
 
 
-_detector_kept_alive: list = []  # 见 face_detector() 里的说明
+def make_backend() -> YoloEyeGaze:
+    """建 YOLO 眼动后端：加载睁闭眼 + 注视两个权重（默认从 models/ 读）。
 
-
-#用模型去检测脸部特征返回一个对象（暂时理解成为一个结构体）
-def face_detector():
-    """建人脸识别器：加载 models/face_landmarker.task，返回识别器对象。
-
-    调用关系：被 main() 在启动时调用一次（读模型很慢，绝不能放进循环）；
-    内部调用 MediaPipe 的 FaceLandmarker.create_from_options()。
-    返回值一路传给 read_frame()，由它每帧调用 detect_for_video()。
+    调用关系：被 main() 在启动时调用一次（读模型慢，绝不能放进循环）；
+    返回值一路传给 read_frame()，由它每帧调 analyze()。
+    本脚本只用它的 open_conf；gaze 部分在第 4/5 步脚本里使用。
     """
-    if not FACE_MODEL.exists():
-        raise FileNotFoundError(f"缺少模型文件：{FACE_MODEL}")
-    vision = mp.tasks.vision
-    options = vision.FaceLandmarkerOptions(
-        base_options=mp.tasks.BaseOptions(model_asset_path=str(FACE_MODEL)),
-        running_mode=vision.RunningMode.VIDEO,
-        num_faces=1,
-        min_face_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
-    detector = vision.FaceLandmarker.create_from_options(options)
-    # 保活：实测 MediaPipe 1.0.1 在 Windows 上回收这个对象要卡约 42 秒
-    # （拆推理图时的内部等待）。留一个长期引用不让它被回收，退出时交给系统回收，
-    # 整个进程 1 秒内就能结束。
-    _detector_kept_alive.append(detector)
-    return detector
+    return YoloEyeGaze()
 
 
 _font_cache: dict[tuple[Path, int], "ImageFont.FreeTypeFont"] = {}
@@ -418,41 +374,20 @@ def draw_chinese_status(frame, lines) -> object:
 # ============================ 3) 主流程 ============================
 
 
-def read_frame(cap, detector, program_started_at: float):
-    """读一帧 → 镜像 → 送识别器，返回（画面, 当前时间, 关键点或 None）。
+def read_frame(cap, backend: YoloEyeGaze):
+    """读一帧 → 【未镜像】送 YOLO → 翻转出显示帧，返回（显示帧, 当前时间, 推理结果）。
 
     调用关系：被 main() 每帧调用（循环的第一步）；
-    内部调用 cap.read()、cv2.flip / cv2.cvtColor / mp.Image，
-    以及 detector.detect_for_video()（真正干活的那一次推理）。
-    三个返回值分别给：画图用（frame）、判定用（now）、算开合值用（landmarks）。
+    内部调用 cap.read()、backend.analyze()（真正干活的那次推理）和 cv2.flip。
+    顺序是铁律：先 analyze 后 flip —— 模型必须吃未镜像帧，镜像只属于显示层。
     """
     ok, frame = cap.read()
     if not ok:
         raise RuntimeError("摄像头读取失败。")
-    frame = cv2.flip(frame, 1)
     now = time.perf_counter()
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-    result = detector.detect_for_video(mp_image, int((now - program_started_at) * 1000))
-
-    #detect_for_video返回对象包含三个东西：
-    #  result.face_landmarks                 ← ★ 唯一被用到的：478 个点的坐标
-    #  result.face_blendshapes               ← 表情系数，没开启 → 空列表
-    #  result.facial_transformation_matrixes ← 人脸姿态矩阵，没开启 → 空列表
-    landmarks = result.face_landmarks[0] if result.face_landmarks else None
-    return frame, now, landmarks
-
-
-def draw_eye_points(frame, landmarks) -> None:
-    """在画面上画黄点，方便肉眼检查关键点准不准。
-
-    调用关系：被 main() 每帧调用（只在检测到人脸时）；内部什么都不调用，
-    只往 frame 上画 12 个圆点——它不参与任何判定。
-    """
-    h, w = frame.shape[:2]
-    for index in LEFT_EYE + RIGHT_EYE:
-        lm = landmarks[index]
-        cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 3, (0, 255, 255), -1)
+    result = backend.analyze(frame)          # ← 推理只吃未镜像帧
+    display = cv2.flip(frame, 1)             # ← 镜像只为显示（自拍视角）
+    return display, now, result
 
 
 def show_status(frame, status) -> None:
@@ -466,7 +401,7 @@ def show_status(frame, status) -> None:
     base_text = "--" if status.baseline is None else f"{status.baseline:.3f}"
     close_text = "--" if status.close_threshold is None else f"{status.close_threshold:.3f}"
     frame = draw_chinese_status(frame, [
-        f"眼睛开合值：{ear_text}｜睁眼基线：{base_text}｜闭眼线：{close_text}",
+        f"睁眼置信度：{ear_text}｜睁眼基线：{base_text}｜闭眼线：{close_text}",
         f"眨眼次数：{status.blink_count}｜状态：{status.state}",
         status.message,
         "按 Q 退出｜按 C 重新校准｜仅视觉测试，不控制任何硬件",
@@ -508,24 +443,22 @@ def main() -> None:
     """程序入口：先建好四样东西，然后每帧走一遍 看→量→判→报→控。"""
     # ==================== 启动阶段（下面每个调用只执行一次）====================
     cap = open_camera()  # ① 打开摄像头
-    detector = face_detector()  # ② 建识别器：调用函数创建MediaPipe人脸关键点检测器对象，用于后续检测人脸
-    program_started_at = time.perf_counter()  # 记录程序启动的高精度时间戳，用于给MediaPipe提供视频时间（帧数不稳定毕竟是数字计算）
-    blink = BlinkDetector(program_started_at)  # ③ 建眨眼状态机；校准起点 = 程序启动时刻，眨眼全部状态都在里面
+    backend = make_backend()  # ② 建 YOLO 后端（加载 eye_yolo26n + gaze5 权重）
+    blink = BlinkDetector(time.perf_counter())  # ③ 建眨眼状态机；校准从此刻开始计时
     key_available_at = 0.0  # 按键防抖：下次允许响应的时间点
     chinese_font(20)  # ④ 提前加载字体，字体缺失时立刻报错
 
-    print("眨眼预览已启动：请先点一下视频窗口让它获得焦点，然后 Q 退出、C 重新校准。")
+    print("眨眼预览已启动（YOLO 版）：请先点一下视频窗口让它获得焦点，然后 Q 退出、C 重新校准。")
     try:
         # ================= 每帧循环：看 → 量 → 判 → 报 → 控 =================
         while True:
-            # ---- ① 看：读一帧并交给 MediaPipe，拿回 478 个关键点 ----
-            frame, now, landmarks = read_frame(cap, detector, program_started_at)
-            if landmarks is not None:
-                draw_eye_points(frame, landmarks)  # 顺便把眼睛上的点画出来（只为肉眼检查）
+            # ---- ① 看：取一帧，未镜像送 YOLO，拿回推理结果；再翻出显示帧 ----
+            frame, now, result = read_frame(cap, backend)
+            if result.face_found:
+                draw_eye_boxes(frame, result, WIDTH)  # 眼睛框（只为肉眼检查，不参与判定）
 
-            # ---- ② 量：把关键点换算成"眼睛张多开"这一个数 ----
-            #ear是用于判定眼睛的状态标志；没检测到人脸时传 None
-            ear_raw = average_ear(landmarks) if landmarks is not None else None
+            # ---- ② 量：睁眼置信度就是"开合值"（没检测到时是 None）----
+            ear_raw = result.open_conf
 
             # ---- ③ 判：校准 / 计数，全部判定逻辑都在 BlinkDetector 里 ----
             status = blink.update(now, ear_raw)
@@ -543,8 +476,6 @@ def main() -> None:
             if key == "c":
                 blink.reset(now, MESSAGE_RECALIBRATE)  # 回到校准起点，重新采集一次基线
     finally:
-        # 不调用 detector.close()：实测它要卡约 42 秒（MediaPipe 1.0.1 拆推理图的等待）。
-        # 配合 face_detector() 里的保活引用，进程 1 秒内干净退出，内存由系统回收。
         cap.release()
         cv2.destroyAllWindows()
 

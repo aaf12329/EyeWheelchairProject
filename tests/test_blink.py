@@ -6,17 +6,12 @@
   3. 只闭 1 帧（噪声）或闭 1.2 秒（眯眼/闭目）都不计数
   4. 不应期（0.3 秒）内不重复计数
   5. 人脸丢失：未完成的状态清零，但计数和基线保留
-  6. 眼睛开合比（EAR）的几何正确性
-"""
+
+（YOLO 版注：状态机吃的信号从 EAR 开合比换成 YOLO 睁眼置信度，测试只喂数字，
+所以本文件除了删掉 EAR 几何测试，其余与 MediaPipe 版一致。）"""
 import pytest
 
-from blink_preview import (
-    LEFT_EYE,
-    RIGHT_EYE,
-    BlinkDetector,
-    average_ear,
-    eye_aspect_ratio,
-)
+from blink_preview import BlinkDetector
 
 FRAME = 1.0 / 30.0  # 模拟 30 FPS
 
@@ -156,44 +151,3 @@ def test_face_lost_clears_in_flight_state():
     assert status.state == "等待稳定睁眼"  # 未完成的状态被清空，从头攒稳定睁眼
 
 
-# ---------------------------- EAR 几何 ----------------------------
-
-
-class FakeLandmark:
-    """假的单个关键点：EAR 只读 x / y。"""
-
-    __slots__ = ("x", "y")
-
-    def __init__(self, x: float, y: float) -> None:
-        self.x = x
-        self.y = y
-
-
-def make_landmarks(vertical_gap: float = 0.05, eye_width: float = 0.06):
-    """造一副 478 点的假人脸：只摆两只眼睛的 12 个点，其余点放画面中央。"""
-    landmarks = [FakeLandmark(0.5, 0.5) for _ in range(478)]
-    for shift, indices in ((0.0, LEFT_EYE), (0.2, RIGHT_EYE)):
-        cx, cy = 0.35 + shift, 0.5
-        landmarks[indices[0]] = FakeLandmark(cx, cy)  # 外眼角
-        landmarks[indices[1]] = FakeLandmark(cx + eye_width * 0.25, cy - vertical_gap / 2)  # 上外
-        landmarks[indices[2]] = FakeLandmark(cx + eye_width * 0.75, cy - vertical_gap / 2)  # 上内
-        landmarks[indices[3]] = FakeLandmark(cx + eye_width, cy)  # 内眼角
-        landmarks[indices[4]] = FakeLandmark(cx + eye_width * 0.75, cy + vertical_gap / 2)  # 下内
-        landmarks[indices[5]] = FakeLandmark(cx + eye_width * 0.25, cy + vertical_gap / 2)  # 下外
-    return landmarks
-
-
-def test_eye_aspect_ratio_open_bigger_than_closed():
-    open_eye = make_landmarks(vertical_gap=0.05, eye_width=0.06)
-    assert eye_aspect_ratio(open_eye, LEFT_EYE) == pytest.approx(0.05 / 0.06)
-    assert average_ear(open_eye) == pytest.approx(0.05 / 0.06)
-
-    closed_eye = make_landmarks(vertical_gap=0.0, eye_width=0.06)
-    assert eye_aspect_ratio(closed_eye, LEFT_EYE) == pytest.approx(0.0)
-
-
-def test_eye_aspect_ratio_degenerate_width_returns_zero():
-    landmarks = make_landmarks()
-    for index in LEFT_EYE:
-        landmarks[index] = FakeLandmark(0.4, 0.5)  # 眼角重合 → 宽度为 0
-    assert eye_aspect_ratio(landmarks, LEFT_EYE) == 0.0

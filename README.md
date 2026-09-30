@@ -78,6 +78,21 @@ EyeWheelchairProject/
 - **干完活**：push 自己分支 → 所有者审核后合并进 main（`git switch main && git merge huang`）。
 - **红线**：虚拟环境（`myvenv/` 等）、密钥、大体积原始数据永不入库（见 `.gitignore`）。
 
+### 三个分支的文件结构差异
+
+每个分支的 README 描述的是自己那一支；上面这张目录结构图是 **`chen`（YOLO 版）** 的：
+
+| | `main` / `huang`（MediaPipe 版） | `chen`（YOLO 版） |
+|---|---|---|
+| 眼动检测 | MediaPipe 478 点几何判定 | YOLO26 眼动模型（eye_yolo26n + gaze5） |
+| `src/vision/` | `landmarks_preview.py` | `yolo_backend.py` + `yolo_preview.py` |
+| `models/` | `face_landmarker.task` + `hand_landmarker.task` | `eye_yolo26n.pt` + `gaze5_yolo26s.pt` + `face_detection_yunet_2023mar.onnx` |
+| `src/interaction/` | 同名三个交互脚本，吃关键点几何 | 同名三个交互脚本，吃 YOLO 信号（状态机逻辑一致） |
+| 依赖 | mediapipe | ultralytics（自动带 torch） |
+
+`huang` 与 `main` 内容一致（**尚未换代到 YOLO**）；`chen` 是迁移验证分支，
+实机验证通过后合入 `main`。换代的细节见"已知问题 1"与进度表的"YOLO 迁移"行。
+
 ## 代码组织
 
 每个脚本内部统一分三段，用注释横幅隔开：
@@ -317,6 +332,20 @@ Multi-contributor collaboration has started, with the following branch rules:
 - **Commit messages** keep this repo's convention: `CH:` / `EN:` bilingual, Chinese first, one line saying what changed.
 - **When done**: push your branch → the owner reviews and merges into main (`git switch main && git merge huang`).
 - **Red lines**: virtualenvs (`myvenv/` etc.), secrets and large raw data files never get committed (see `.gitignore`).
+
+### Per-branch file structure
+
+Each branch's README describes its own tree; the directory structure above is **`chen` (YOLO)**:
+
+| | `main` / `huang` (MediaPipe) | `chen` (YOLO) |
+|---|---|---|
+| Eye detection | MediaPipe 478-point geometry | YOLO26 eye models (eye_yolo26n + gaze5) |
+| `src/vision/` | `landmarks_preview.py` | `yolo_backend.py` + `yolo_preview.py` |
+| `models/` | `face_landmarker.task` + `hand_landmarker.task` | `eye_yolo26n.pt` + `gaze5_yolo26s.pt` + `face_detection_yunet_2023mar.onnx` |
+| `src/interaction/` | the same three scripts, consuming keypoint geometry | the same three scripts, consuming YOLO signals (identical state machines) |
+| Dependencies | mediapipe | ultralytics (pulls in torch) |
+
+`huang` currently matches `main` (**not yet migrated to YOLO**); `chen` is the migration/verification branch and merges into `main` after on-device verification. Details in Known Issues 1 and the *YOLO migration* row of the progress table.
 
 ## Code Organization
 

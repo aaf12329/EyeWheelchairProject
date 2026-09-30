@@ -1,13 +1,23 @@
-"""第 4 步：单摄像头视线方向选择预览（左/中/右）。
+"""第 4 步：单摄像头视线方向选择预览（左/中/右，YOLO 版）。
 
 先看正前方完成校准，再把视线移到屏幕左侧、中间、右侧。
 本程序只显示候选方向，不发送确认或任何硬件控制指令。
 
 按 Q 退出；按 C 重新校准；按 I 反转左右方向（若左右显示与实际相反）。
 
+本版把 MediaPipe 虹膜几何判定整体换成了 YOLO26 注视模型
+（models/gaze5_yolo26s.pt，5 类：上/中/下/左/右，由 Yolo_model 项目训练交付）：
+  旧链路：MediaPipe 478 点 → 虹膜水平位置 score → 阈值判定
+  新链路：Haar 定位眼睛 → 裁剪 → YOLO 判 5 类 → 左0/中0.5/右1 当"score" → 原状态机
+GazeDirectionDetector 状态机（校准/稳定停留/候选）逻辑没变，只是信号来源换了；
+校准保留：它吸收分类器在当前摄像头下的偏置（比如你正视时模型总偏一点）。
+
+⚠️ 铁律：YOLO 推理只吃【未镜像帧】（镜像会把看左/看右反转），镜像只用于显示层。
+   详见 vision/yolo_backend.py。
+
 文件分三段：
-  1) 判定逻辑（纯逻辑 + 状态机类，只吃关键点，不碰摄像头也不画图）—— 可以单独跑测试
-  2) 摄像头与画面（打开设备、建识别器、画中文和卡片）
+  1) 判定逻辑（纯逻辑 + 状态机类，只吃数字信号，不碰摄像头也不画图）—— 可以单独跑测试
+  2) 摄像头与画面（打开设备、建 YOLO 后端、画中文和卡片）
   3) 主流程 main()：读帧 → 更新状态机 → 画 → 按键
 
 ============================ 调用关系总览 ============================
@@ -16,22 +26,19 @@
   │
   ├─ 启动阶段（每个只执行一次）
   │   ├─ open_camera()                  打开摄像头，返回 cap（后面每帧从它 read）
-  │   ├─ create_detector()              建识别器：加载 models/face_landmarker.task
-  │   │                                 （和 blink_preview.py 的 face_detector()、
-  │   │                                   gaze_blink_confirm_demo.py 的 make_detector()
-  │   │                                   是同一段逻辑，只是各文件自己留了一份）
+  │   ├─ make_backend()                 建 YOLO 后端：加载 eye + gaze5 权重
   │   ├─ GazeDirectionDetector(started) 建状态机；校准从此刻开始计时
   │   │    └─ self.reset(now)           把所有状态置位（按 C 重新校准走的也是它）
   │   └─ chinese_font(20)               预加载中文字体，缺字体时立刻报错
   │
   ├─ 每帧循环（★ 每帧都执行；顺序 看 → 判 → 报 → 控）
-  │   ├─★ read_frame(cap, detector, started)
-  │   │    ├─ cap.read() / cv2.flip / cv2.cvtColor / mp.Image   取一帧并预处理
-  │   │    ├─ detector.detect_for_video(图, 毫秒时间戳)          ← MediaPipe 推理
-  │   │    └─ 返回 (frame, now, landmarks 或 None)
-  │   ├─★ draw_iris_points(frame, landmarks)  把两只眼的虹膜 10 个点画出来（只为肉眼检查）
-  │   ├─★ flow.update(now, landmarks)         ★核心判定（纯逻辑，可单测）
-  │   │    ├─ gaze_score(landmarks)           虹膜水平位置 → 一个数
+  │   ├─★ read_frame(cap, backend)
+  │   │    ├─ cap.read()                             取【原始帧】（不镜像！）
+  │   │    ├─ backend.analyze(frame)                 ← YOLO 推理（未镜像帧，铁律）
+  │   │    ├─ cv2.flip(frame, 1)                     只为显示做镜像
+  │   │    └─ 返回 (显示帧, now, EyeGazeResult)
+  │   ├─★ draw_eye_boxes(显示帧, result, 宽)          画眼睛框 + 注视类别（只为肉眼检查）
+  │   ├─★ flow.update(now, result.gaze_score)        ★核心判定（纯逻辑，可单测）
   │   │    ├─ _update_calibration()           校准中走这里；3 秒后算出正视基准 center
   │   │    ├─ _update_selection()             校准后走这里；偏移量决定 左/中/右，稳定后出候选
   │   │    └─ _status(...) → GazeStatus       把本帧结果打包返回
@@ -48,9 +55,9 @@
 这台状态机比 gaze_blink_confirm_demo.py 那台简单，只有两个阶段加两个方向变量：
 
     校准      ──(满 3 秒 且 样本≥10 个)──▶ 选择方向
-    选择方向  ：每帧把"虹膜偏移量"分成 左 / 中 / 右 三种当前方向；
+    选择方向  ：每帧把"水平注视信号"分成 左 / 中 / 右 三种当前方向；
                 同一方向稳定停留 0.70 秒 → 成为"稳定候选"（屏幕上高亮那张卡片）
-    任意阶段  ──(人脸丢失)──────────────▶ 候选作废、方向重新计时（校准不打断）
+    任意阶段  ──(信号不可用)──────────────▶ 候选作废、方向重新计时（校准不打断）
     任意阶段  ──(按 C)──────────────────▶ 校准（reset(now) 把一切拨回起点）
 
 注意：这里没有"确认"这一步——它只挑候选方向，眨眼确认由第 5 步的程序负责。
@@ -58,12 +65,16 @@
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 import time
 
 import cv2
-import mediapipe as mp
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+# 本项目各脚本独立运行（没有包结构），把 src/ 加进搜索路径以引入 YOLO 后端
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from vision.yolo_backend import YoloEyeGaze, draw_eye_boxes  # noqa: E402  ← 在 sys.path 之后导入
 
 # ---- 运行参数 ----
 CAMERA_INDEX = 0
@@ -72,7 +83,7 @@ CALIBRATION_SECONDS = 3.0     # 校准时长：这段时间请看屏幕正中间
 CALIBRATION_MIN_SAMPLES = 10  # 样本下限：帧率过低时样本太少，基准不可靠
 SIDE_THRESHOLD = 0.075        # 相对于正视基准的水平偏移：超过它才算看左/看右
 STABLE_SECONDS = 0.70         # 同方向稳定停留多久才成为候选
-SMOOTHING_FRAMES = 5          # 虹膜位置平滑：最近几帧取平均
+SMOOTHING_FRAMES = 5          # 注视信号平滑：最近几帧取平均
 KEY_DEBOUNCE_SECONDS = 0.25   # 两次按键响应的最小间隔：按住不放时不再连发
 
 MESSAGE_INITIAL = "请看屏幕正中间，正在校准"
@@ -80,8 +91,7 @@ MESSAGE_RECALIBRATE = "重新校准：请看屏幕正中间"
 
 # ---- 路径与窗口 ----
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-FACE_MODEL = PROJECT_ROOT / "models" / "face_landmarker.task"
-WINDOW_NAME = "Gaze Direction | Q quit | C recalibrate | I invert | visual test only"
+WINDOW_NAME = "Gaze Direction (YOLO) | Q quit | C recalibrate | I invert | visual test only"
 # 中文字体逐个探测：msyh 缺失时回退，换机器不会直接崩
 FONT_CANDIDATES = (
     Path(r"C:\Windows\Fonts\msyh.ttc"),
@@ -89,34 +99,8 @@ FONT_CANDIDATES = (
     Path(r"C:\Windows\Fonts\arial.ttf"),
 )
 
-# Face Landmarker 中的虹膜点及眼角点。
-LEFT_IRIS = [468, 469, 470, 471, 472]
-RIGHT_IRIS = [473, 474, 475, 476, 477]
-LEFT_CORNERS = (33, 133)
-RIGHT_CORNERS = (362, 263)
-
 
 # ============================ 1) 判定逻辑（纯逻辑） ============================
-
-
-def gaze_score(landmarks) -> float | None:
-    """虹膜在双眼水平方向的平均归一化位置：0 = 贴左眼角，1 = 贴右眼角。
-
-    调用关系：被 GazeDirectionDetector.update() 每帧调用一次；它决定了"左 / 中 / 右"。
-    内部只用关键点的 x 坐标，不画图、也不做判断（判断在状态机里）。
-    眼角间距太小时（画面上几乎重合）会返回 None，表示这个数不可用。
-    """
-    def average_x(indices):
-        return sum(landmarks[i].x for i in indices) / len(indices)
-
-    ratios = []
-    for iris, corners in ((LEFT_IRIS, LEFT_CORNERS), (RIGHT_IRIS, RIGHT_CORNERS)):
-        a, b = landmarks[corners[0]].x, landmarks[corners[1]].x
-        span = abs(b - a)
-        if span < 1e-5:
-            continue
-        ratios.append((average_x(iris) - min(a, b)) / span)
-    return sum(ratios) / len(ratios) if ratios else None
 
 
 @dataclass(frozen=True)
@@ -127,7 +111,7 @@ class GazeStatus:
     它只是"数据袋子"，自身不含任何逻辑。
     """
 
-    score: float | None          # 本帧的虹膜位置（平滑后；没人脸或不可用时是 None）
+    score: float | None          # 本帧的水平注视信号（平滑后；不可用时是 None）
     center: float | None         # 正视基准（校准完成前是 None）
     raw_direction: str           # 这一帧视线落在哪个方向：左 / 中 / 右
     candidate: str               # 稳定停留够久的方向；还没稳定时是 "无"
@@ -135,7 +119,7 @@ class GazeStatus:
 
 
 class GazeDirectionDetector:
-    """视线方向的校准 + 选择状态机。原来散在 main() 里的状态，现在全在这个对象里。
+    """视线方向的校准 + 选择状态机。逻辑与 MediaPipe 版一致，输入换成信号。
 
     调用关系：main() 在启动时建一个；之后每帧调 update()；
     按 C 调 reset()，按 I 调 toggle_invert()。update() 内部按阶段分派：
@@ -144,9 +128,9 @@ class GazeDirectionDetector:
     两种情况都由 _status(...) 打包成 GazeStatus 返回。
 
     用法：`GazeDirectionDetector(time.perf_counter())`，之后每帧调用
-    `update(now, landmarks)`；没检测到人脸时传 None。
-    注意它只依赖关键点对象上的 .x 属性，不 import cv2 或 mediapipe，
-    所以测试时可以喂"只有 x、y 的假点"。
+    `update(now, score_raw)` —— score_raw 是 YOLO 后端的水平注视信号
+    （左 0 / 中 0.5 / 右 1），不可用时传 None。
+    它只依赖浮点数，不 import cv2，所以测试时直接喂数字就行（比旧版喂假关键点更简单）。
     """
 
     def __init__(
@@ -163,7 +147,7 @@ class GazeDirectionDetector:
         self._calibration_min_samples = calibration_min_samples
         self._side_threshold = side_threshold
         self._stable_seconds = stable_seconds
-        # 平滑用的滚动队列：最近几帧虹膜位置
+        # 平滑用的滚动队列：最近几帧注视信号
         self._history: deque[float] = deque(maxlen=smoothing_frames)
         self._invert = False  # 按 I 切换：左右方向是否反转
         self.reset(now)
@@ -171,7 +155,7 @@ class GazeDirectionDetector:
     def reset(self, now: float, message: str = MESSAGE_INITIAL) -> None:
         """回到校准起点。构造时和按 C 重新校准时都走这里，避免两处手抄不一致。"""
         self._calibration_started = now           # 校准阶段的起始时间
-        self._calibration_values: list[float] = []  # 校准期间攒的虹膜位置
+        self._calibration_values: list[float] = []  # 校准期间攒的信号值
         self._center: float | None = None         # 正视基准；它等于 None 就表示"还在校准"
         self._history.clear()
         # ---- 状态机的两个方向变量 ----
@@ -187,34 +171,36 @@ class GazeDirectionDetector:
         self._invert = not self._invert
         self._message = "左右方向已反转" if self._invert else "左右方向已恢复"
 
-    def update(self, now: float, landmarks) -> GazeStatus:
-        """吃一帧数据，返回本帧状态。landmarks 传 None 表示这帧没检测到人脸。"""
-        if landmarks is None:
-            # 没人脸：候选作废、方向重新计时；但"校准"不打断（否则一转头就白校准了）
+    def update(self, now: float, score_raw: float | None) -> GazeStatus:
+        """吃一帧数据，返回本帧状态。score_raw 传 None 表示这帧信号不可用。"""
+        if score_raw is None:
+            # 信号不可用：候选作废、方向重新计时；但"校准"不打断（否则一转头就白校准了）
             self._message = "未检测到人脸：请正对摄像头"
             self._candidate = "无"
             self._direction_since = None
             return self._status(score=None)
 
-        score = gaze_score(landmarks)
-        if score is not None:
-            self._history.append(score)
-            score = sum(self._history) / len(self._history)  # 最近几帧取平均，抹掉抖动
+        self._history.append(score_raw)
+        score = sum(self._history) / len(self._history)  # 最近几帧取平均，抹掉抖动
 
-        if self._center is None and score is not None:
+        if self._center is None:
             self._update_calibration(now, score)
-        elif self._center is not None and score is not None:
+        else:
             self._update_selection(now, score)
         return self._status(score=score)
 
     def _update_calibration(self, now: float, score: float) -> None:
-        """校准阶段：攒样本，够 3 秒且样本足够后算出正视基准 _center。"""
+        """校准阶段：攒样本，够 3 秒且样本足够后算出正视基准 _center。
+
+        YOLO 版语义：基准吸收分类器在当前人/摄像头下的偏置 —— 你正视时模型
+        未必输出严格的 0.5，校准把它量出来当"中"。
+        """
         self._calibration_values.append(score)
         elapsed = now - self._calibration_started
         self._message = f"校准中：请看屏幕正中间 {max(0, self._calibration_seconds - elapsed):.1f} 秒"
         if elapsed < self._calibration_seconds or len(self._calibration_values) < self._calibration_min_samples:
             return
-        # 掐掉头尾各 10%（偶发眨眼的极值），用中间 80% 的平均值当正视基准
+        # 掐掉头尾各 10%（偶发偏移的极值），用中间 80% 的平均值当正视基准
         values = sorted(self._calibration_values)
         trim = max(1, len(values) // 10)
         kept = values[trim:-trim] or values
@@ -272,32 +258,14 @@ def open_camera() -> cv2.VideoCapture:
     return cap
 
 
-_detector_kept_alive: list = []  # 见 create_detector() 里的说明
-
-
-def create_detector():
-    """建人脸识别器：加载 models/face_landmarker.task，返回识别器对象。
+def make_backend() -> YoloEyeGaze:
+    """建 YOLO 眼动后端：加载睁闭眼 + 注视两个权重（默认从 models/ 读）。
 
     调用关系：被 main() 在启动时调用一次（读模型慢，绝不能放进循环）；
-    内部调用 MediaPipe 的 FaceLandmarker.create_from_options()。
-    返回值一路传给 read_frame()，由它每帧调用 detect_for_video()。
+    返回值一路传给 read_frame()，由它每帧调 analyze()。
+    本脚本只用它的 gaze_score / gaze_label。
     """
-    if not FACE_MODEL.exists():
-        raise FileNotFoundError(f"缺少模型文件：{FACE_MODEL}")
-    vision = mp.tasks.vision
-    options = vision.FaceLandmarkerOptions(
-        base_options=mp.tasks.BaseOptions(model_asset_path=str(FACE_MODEL)),
-        running_mode=vision.RunningMode.VIDEO,
-        num_faces=1,
-        min_face_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
-    detector = vision.FaceLandmarker.create_from_options(options)
-    # 保活：实测 MediaPipe 1.0.1 在 Windows 上回收这个对象要卡约 42 秒
-    # （拆推理图时的内部等待）。留一个长期引用不让它被回收，退出时交给系统回收，
-    # 整个进程 1 秒内就能结束。
-    _detector_kept_alive.append(detector)
-    return detector
+    return YoloEyeGaze()
 
 
 _font_cache: dict[tuple[Path, int], "ImageFont.FreeTypeFont"] = {}
@@ -351,34 +319,20 @@ def draw_cards(frame, candidate: str):
 # ============================ 3) 主流程 ============================
 
 
-def read_frame(cap, detector, started: float):
-    """读一帧 → 镜像 → 送识别器，返回（画面, 当前时间, 关键点或 None）。
+def read_frame(cap, backend: YoloEyeGaze):
+    """读一帧 → 【未镜像】送 YOLO → 翻转出显示帧，返回（显示帧, 当前时间, 推理结果）。
 
     调用关系：被 main() 每帧调用（循环第一步）；内部调用 cap.read()、
-    cv2.flip / cv2.cvtColor / mp.Image，以及 detector.detect_for_video()（真正推理的那次）。
+    backend.analyze()（真正推理的那次）和 cv2.flip。
+    顺序是铁律：先 analyze 后 flip —— 模型必须吃未镜像帧，镜像只属于显示层。
     """
     ok, frame = cap.read()
     if not ok:
         raise RuntimeError("摄像头读取失败。")
-    frame = cv2.flip(frame, 1)
     now = time.perf_counter()
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-    result = detector.detect_for_video(image, int((now - started) * 1000))
-    # detect_for_video 返回对象里，本项目只用到 face_landmarks（478 个点）
-    landmarks = result.face_landmarks[0] if result.face_landmarks else None
-    return frame, now, landmarks
-
-
-def draw_iris_points(frame, landmarks) -> None:
-    """把两只眼的虹膜 10 个点画成黄点，方便肉眼检查识别准不准。
-
-    调用关系：被 main() 每帧调用（只在检测到人脸时）；只画图，不参与任何判定。
-    """
-    h, w = frame.shape[:2]
-    for idx in LEFT_IRIS + RIGHT_IRIS:
-        lm = landmarks[idx]
-        cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 3, (0, 255, 255), -1)
+    result = backend.analyze(frame)          # ← 推理只吃未镜像帧
+    display = cv2.flip(frame, 1)             # ← 镜像只为显示（自拍视角）
+    return display, now, result
 
 
 def show_status(frame, status) -> None:
@@ -390,7 +344,7 @@ def show_status(frame, status) -> None:
     cv2.rectangle(frame, (0, 0), (650, 105), (0, 0, 0), -1)
     score_text = "--" if status.score is None else f"{status.score:.3f}"
     base_text = "--" if status.center is None else f"{status.center:.3f}"
-    frame = draw_text(frame, f"虹膜位置：{score_text}｜正视基准：{base_text}", (14, 10), 20, (0, 255, 0))
+    frame = draw_text(frame, f"注视信号：{score_text}｜正视基准：{base_text}", (14, 10), 20, (0, 255, 0))
     frame = draw_text(frame, f"当前方向：{status.raw_direction}｜稳定候选：{status.candidate}", (14, 38), 28, (255, 255, 0))
     frame = draw_text(frame, status.message, (14, 74), 18, (255, 255, 255))
     frame = draw_cards(frame, status.candidate)
@@ -423,26 +377,25 @@ def pressed_key(now: float, key_available_at: float):
 
 
 def main() -> None:
-    """程序入口：建好摄像头和识别器后，每帧走一遍 看→判→报→控。"""
+    """程序入口：建好摄像头和 YOLO 后端后，每帧走一遍 看→判→报→控。"""
     # ==================== 启动阶段（下面每个调用只执行一次）====================
     cap = open_camera()                          # ① 打开摄像头
-    detector = create_detector()                 # ② 建识别器
-    started = time.perf_counter()                # 给 MediaPipe 算毫秒时间戳用
-    flow = GazeDirectionDetector(started)        # ③ 建状态机；校准从此刻开始计时
+    backend = make_backend()                     # ② 建 YOLO 后端
+    flow = GazeDirectionDetector(time.perf_counter())  # ③ 建状态机；校准从此刻开始计时
     key_available_at = 0.0                       # 按键防抖：下次允许响应的时间点
     chinese_font(20)                             # ④ 提前加载字体，字体缺失时立刻报错
 
-    print("视线方向预览已启动：请先点一下视频窗口让它获得焦点，然后 Q 退出、C 重新校准、I 反转左右。")
+    print("视线方向预览已启动（YOLO 版）：请先点一下视频窗口让它获得焦点，然后 Q 退出、C 重新校准、I 反转左右。")
     try:
         # ================= 每帧循环：看 → 判 → 报 → 控 =================
         while True:
-            # ---- ① 看：取一帧并识别，拿回 478 个关键点 ----
-            frame, now, landmarks = read_frame(cap, detector, started)
-            if landmarks is not None:
-                draw_iris_points(frame, landmarks)  # 顺便把虹膜上的点画出来（只为肉眼检查）
+            # ---- ① 看：取一帧，未镜像送 YOLO，拿回推理结果；再翻出显示帧 ----
+            frame, now, result = read_frame(cap, backend)
+            if result.face_found:
+                draw_eye_boxes(frame, result, WIDTH)  # 眼睛框（只为肉眼检查，不参与判定）
 
             # ---- ② 判：校准 / 方向选择，全在 GazeDirectionDetector 里 ----
-            status = flow.update(now, landmarks)
+            status = flow.update(now, result.gaze_score)
 
             # ---- ③ 报：三行中文 + 三张卡片，推给窗口 ----
             show_status(frame, status)
@@ -459,8 +412,6 @@ def main() -> None:
             if key == "i":
                 flow.toggle_invert()                   # 左右方向反转 / 恢复
     finally:
-        # 不调用 detector.close()：实测它要卡约 42 秒（MediaPipe 1.0.1 拆推理图的等待）。
-        # 配合 create_detector() 里的保活引用，进程 1 秒内干净退出，内存由系统回收。
         cap.release()
         cv2.destroyAllWindows()
 

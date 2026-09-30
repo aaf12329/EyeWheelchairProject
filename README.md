@@ -89,7 +89,8 @@ EyeWheelchairProject/
 | | `main` / `huang`（MediaPipe 版） | `chen`（YOLO 版） |
 |---|---|---|
 | 眼动检测 | MediaPipe 478 点几何判定 | YOLO26 眼动模型（eye_yolo26n + gaze5） |
-| `src/vision/` | `landmarks_preview.py` | `yolo_backend.py` + `yolo_preview.py` |
+| `src/vision/` | `landmarks_preview.py` | `yolo_backend.py` + `yolo_preview.py`（内含共用层） |
+| `src/common/` | —（无，各脚本自带拷贝） | `paths.py` + `camera_utils.py` + `draw_utils.py`（2026-09-29 解耦新增） |
 | `models/` | `face_landmarker.task` + `hand_landmarker.task` | `eye_yolo26n.pt` + `gaze5_yolo26s.pt` + `face_detection_yunet_2023mar.onnx` |
 | `src/interaction/` | 同名三个交互脚本，吃关键点几何 | 同名三个交互脚本，吃 YOLO 信号（状态机逻辑一致） |
 | 依赖 | mediapipe | ultralytics（自动带 torch） |
@@ -260,8 +261,10 @@ Python 端的串口输出层也已落地：`src/hardware/serial_link.py`
 1. **实机完整验证 `camera_preview.py`**：重构版还没完整跑过，用之前先测预览 / 录像 / 截图三项。
 2. **补常驻测试**：`tests/` 已覆盖第 3 步（眨眼）、串口层与界面渲染；第 4 步（视线方向）的行为
    验证仍是一次性脚本，可照 `test_serial_link.py` 的样子落成常驻用例。
-3. **抽公共部分**：打开摄像头、构建检测器、中文绘制在五个脚本里各有一份拷贝，改一处要同步五处，
-   是下一个该消除的重复。
+3. ~~**抽公共部分**~~ ✅ **已完成（2026-09-29）**：新增 `src/common/` 共用层——
+   `paths.py` 路径地址簿（项目根/权重/字体，禁止各文件自拼路径）+ `camera_utils.open_camera()`
+   （原 5 份副本合并）+ `draw_utils.chinese_font/draw_text()`（原 4 份合并），
+   5 个脚本删除本地拷贝改为 import，净减 143 行；pytest 27 通过、运行时冒烟全绿。
 4. **台架验证 `firmware/wheelchair_controller.ino`**：按文件底部 7 条清单逐项过
    （接线核对 → PWM 噪音/温度 → 看门狗 → 长跑 → 转向先停 → 低电模拟 → 电压对表），
    全过后加装物理急停按钮。
@@ -348,7 +351,8 @@ Each branch's README describes its own tree; the directory structure above is **
 | | `main` / `huang` (MediaPipe) | `chen` (YOLO) |
 |---|---|---|
 | Eye detection | MediaPipe 478-point geometry | YOLO26 eye models (eye_yolo26n + gaze5) |
-| `src/vision/` | `landmarks_preview.py` | `yolo_backend.py` + `yolo_preview.py` |
+| `src/vision/` | `landmarks_preview.py` | `yolo_backend.py` + `yolo_preview.py` (with the shared layer) |
+| `src/common/` | — (none; each script keeps its own copies) | `paths.py` + `camera_utils.py` + `draw_utils.py` (added 2026-09-29) |
 | `models/` | `face_landmarker.task` + `hand_landmarker.task` | `eye_yolo26n.pt` + `gaze5_yolo26s.pt` + `face_detection_yunet_2023mar.onnx` |
 | `src/interaction/` | the same three scripts, consuming keypoint geometry | the same three scripts, consuming YOLO signals (identical state machines) |
 | Dependencies | mediapipe | ultralytics (pulls in torch) |
@@ -497,7 +501,10 @@ These three are the current, real boundaries of the system and are "known, delib
 
 1. **Fully verify `camera_preview.py` on the real machine**: the refactored version has never been run end to end — test preview / record / snapshot first.
 2. **Add permanent tests**: `tests/` now covers step 3 (blink), the serial layer and UI rendering; the step 4 (gaze direction) behaviour checks are still one-off scripts and could be turned into permanent cases like `test_serial_link.py`.
-3. **Extract the common parts**: opening the camera, building detectors and drawing Chinese text are copied in all five scripts, so one change means five edits — the next duplication to remove.
+3. ~~**Extract the common parts**~~ ✅ **Done (2026-09-29)**: new `src/common/` shared layer —
+   `paths.py` path registry (root/weights/fonts; no ad-hoc paths), `camera_utils.open_camera()`
+   (merged from 5 copies), `draw_utils.chinese_font/draw_text()` (merged from 4 copies);
+   the five scripts now import instead of duplicating (-143 lines). pytest 27 passed, runtime smoke green.
 4. **Bench-verify `firmware/wheelchair_controller.ino`**: work through the 7-item checklist at the end of the file (wiring check → PWM noise/temperature → watchdog → long run → stop-before-turn → low-battery simulation → voltage cross-check); then add a physical e-stop button.
 5. **On-device integration of the serial layer**: plug in the Arduino, set `ENABLE_HARDWARE = True` with the right port in `gaze_blink_confirm_demo.py`, and verify the three chains — heartbeat keep-alive, `GET_DATA` battery replies, and forced stop on low battery.
 6. **Verify the YOLO pipeline on the real machine**: the eye models have a domain gap (see Known Issues 1). On a new machine run `yolo_preview.py` first to inspect the raw output, and re-calibrate / re-train with fresh data from the Yolo_model project if needed.

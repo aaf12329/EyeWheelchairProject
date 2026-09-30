@@ -10,6 +10,10 @@ Eye-controlled wheelchair prototype — gaze + blink interaction. Python side ru
 
 用普通 USB 摄像头识别"眼睛在看哪个方向"和"有没有眨眼"，先把**眼控交互**这条路走通。
 
+眼动检测由 **YOLO26 模型**完成（Yolo_model 项目交付：`models/eye_yolo26n.pt` 睁/闭眼 2 类 +
+`models/gaze5_yolo26s.pt` 注视 5 类），MediaPipe 已于 2026-09-30 从交互链路全面移除
+（该迁移在 `chen` 分支完成，见"协作与分支"）。
+
 > ⚠️ **安全边界**：Python 端默认是**纯屏幕模拟**（`gaze_blink_confirm_demo.py` 顶部
 > `ENABLE_HARDWARE = False`），不向任何硬件发指令。Arduino 固件（`firmware/`）与串口输出层
 > （`src/hardware/`）已经写好，但**未台架验证、默认关闭**；台架清单全过且加装物理急停按钮之前，
@@ -22,7 +26,7 @@ Eye-controlled wheelchair prototype — gaze + blink interaction. Python side ru
 最终要做的是"注视选方向 + 眨眼当确认键"，替代摇杆：
 
 1. **校准（3 秒）**：睁眼看屏幕正中间，程序量出你自己的"睁眼基线"，并派生出两条判定线（闭眼线 / 睁眼线）。
-   每个人的眼型、眼镜、坐姿距离都不同，所以阈值必须由本人现场标定，不能写死。
+   YOLO 版量的是**睁眼置信度**基线 —— 模型置信度随摄像头与光照漂移，所以现场标定照旧必要，不能写死。
 2. **选方向**：视线移到屏幕左 / 中 / 右（或左转 / 前进 / 右转），同一方向稳定停留约 0.7 秒才成为候选。
 3. **眨眼确认**：一次自然眨眼（闭眼约 0.04~0.8 秒）才算数；闭得太短当噪声忽略，闭得太久（眯眼、闭目休息）不算。
    两次计数之间留 0.3 秒不应期，避免一次眨眼被数成两三次。
@@ -37,7 +41,8 @@ EyeWheelchairProject/
 │  ├─ camera/
 │  │  └─ camera_preview.py            第 1 周：摄像头基线（预览 / 录像 / 截图）
 │  ├─ vision/
-│  │  └─ landmarks_preview.py         第 2 周：人脸 478 点 + 手部 21 点可视化
+│  │  ├─ yolo_backend.py              YOLO 眼动后端：Haar 定位眼睛 + 双模型推理 + 信号换算
+│  │  └─ yolo_preview.py              第 2 周（YOLO 版）：睁/闭眼 + 5 类注视检测可视化
 │  └─ interaction/
 │     ├─ blink_preview.py             第 3 步：眨眼校准与计数（已重构，含测试）
 │     ├─ gaze_direction_preview.py    第 4 步：视线方向选择（左 / 中 / 右）
@@ -48,7 +53,7 @@ EyeWheelchairProject/
 ├─ firmware/
 │  └─ wheelchair_controller.ino       Arduino 修订版固件（含台架验证清单，待实机验证）
 ├─ Related_materials/                 硬件照片、参考固件（ardino_demo.ino）等资料
-├─ models/                            MediaPipe 模型文件（face / hand landmarker，已入库）
+├─ models/                            YOLO26 眼动权重（eye_yolo26n / gaze5_yolo26s，已入库）
 ├─ data/                              录制素材（raw_videos / snapshots）
 ├─ requirements.md                    依赖清单
 ├─ GIT_GUIDE.md                       组员 Git 上手指南（分支规则 / 日常循环 / 提交格式）
@@ -98,7 +103,7 @@ EyeWheelchairProject/
 
 ```bash
 python -m venv venv
-venv\Scripts\python.exe -m pip install opencv-python mediapipe numpy pillow pyserial pytest
+venv\Scripts\python.exe -m pip install opencv-python ultralytics numpy pillow pyserial pytest
 ```
 
 在 Git Bash 里把 `venv\Scripts\python.exe` 写成 `venv/Scripts/python.exe`，下文同理。
@@ -112,7 +117,7 @@ venv\Scripts\python.exe src\interaction\blink_preview.py
 | 脚本 | 按键 |
 |---|---|
 | `src/camera/camera_preview.py` | `Q` 退出 · `R` 开始/停止录像 · `S` 截图 |
-| `src/vision/landmarks_preview.py` | `Q` 退出 · `S` 保存带关键点的截图 |
+| `src/vision/yolo_preview.py` | `Q` 退出 · `S` 保存带检测框的截图 |
 | `src/interaction/blink_preview.py` | `Q` 退出 · `C` 重新校准 |
 | `src/interaction/gaze_direction_preview.py` | `Q` 退出 · `C` 重新校准 · `I` 反转左右 |
 | `src/interaction/gaze_blink_confirm_demo.py` | `Q` 退出 · `C` 重新校准 · `I` 反转左右 |
@@ -128,9 +133,10 @@ venv\Scripts\python.exe src\interaction\blink_preview.py
 venv\Scripts\python.exe -m pytest -q
 ```
 
-约 1 秒跑完，共 29 条：眨眼判定的校准 / 计数 / 过短过长忽略 / 不应期 / 人脸丢失重置，
-串口链路的意图翻译 / 心跳 / 电池解析 / 低电锁，界面渲染冒烟，外加一个加载真实模型的冒烟测试。
-全部使用合成数据，**不需要摄像头和硬件**；`data/raw_videos` 里没有可用录像时会自动跳过视频那条。
+约 4 秒跑完，共 35 条（33 通过 + 2 条 YOLO 推理冒烟在缺 ultralytics/权重时自动跳过）：
+眨眼判定的校准 / 计数 / 过短过长忽略 / 不应期 / 人脸丢失重置，YOLO 后端的信号换算与
+双眼合并 / 全黑画面推理冒烟，串口链路的意图翻译 / 心跳 / 电池解析 / 低电锁，界面渲染冒烟。
+全部使用合成数据，**不需要摄像头和硬件**。
 
 改代码的习惯：**改动前后各跑一次 `pytest`**。它会把"这次改动有没有破坏原有行为"直接告诉你，不用开摄像头靠肉眼验证。
 
@@ -187,28 +193,32 @@ Python 端的串口输出层也已落地：`src/hardware/serial_link.py`
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 第 1 周 | 摄像头基线（预览 / 录像 / 截图） | ⚠️ 重构版待实机完整验证 |
-| 第 2 周 | MediaPipe 人脸与手部关键点可视化 | ✅ 已重构（初步测试通过） |
+| 第 2 周 | 检测可视化（原 MediaPipe 关键点 → 现 YOLO 检测框） | ✅ yolo_preview 接替 |
 | 第 3 步 | 眨眼校准与计数（重构 + 单元测试） | ✅ 已实测通过 |
 | 第 4 步 | 视线方向选择（左 / 中 / 右） | ✅ 已重构（初步测试通过） |
 | 第 5 步 | 视线选方向 + 眨眼确认（屏幕演示） | ✅ 已重构（初步测试通过） |
 | 代码整理 | 四个脚本统一为三段式结构 + 调用关系注释，判定逻辑可单测 | ✅ |
 | 固件 | Arduino 控制器安全修订版（看门狗/char 缓冲/转向先停/PWM 频率），含台架清单 | 🔶 已写好，待台架验证 |
 | 串口输出层 | `src/hardware/serial_link.py`（心跳/电池轮询/低电锁/模拟模式），含 13 条测试 | 🔶 已写好，待接实机 |
+| YOLO 迁移 | MediaPipe 全面换成 YOLO26 眼动模型（eye_yolo26n + gaze5），状态机与测试保留 | ✅ chen 分支完成，待实机验证 |
 | 下一步 | 台架验证固件 → 插上 Arduino 实机联调串口层 | ⬜ 未开始 |
 
 ## 已知问题与注意事项
 
-1. **退出行为（五个脚本已统一处理）**：MediaPipe 1.0.1 在 Windows 上销毁识别器要卡约 42 秒（实测）。
-   涉及 MediaPipe 的四个脚本现在都不再调用 `close()`，改为在检测器构建函数里保留一个长期引用（保活），
-   让进程退出时由系统一次性回收 —— 按 Q 或点窗口 ✕ 之后**1 秒内**结束。
-   `camera_preview.py` 不使用 MediaPipe，本来就没有这个问题。
+1. **YOLO 域差距（诚实声明，来自 Yolo_model 实测）**：眼动模型在训练域 95%+，
+   换机器/换摄像头会明显下降 —— 表现为候选不出、眨眼不计数，而不是报错。
+   排查顺序：先跑 `src/vision/yolo_preview.py` 看裸输出（框稳不稳、类别对不对），
+   再调 `src/vision/yolo_backend.py` 顶部的 `CONF_THRESHOLD`（当前 0.30）。
+   另：眼部定位从训练时的 MediaPipe 关键点框换成了 Haar 级联框，裁剪分布略有差异。
+   （旧版"MediaPipe 退出卡 42 秒"的问题随 MediaPipe 移除一并消失。）
 2. **`camera_preview.py` 尚未实机完整验证**：它由另一版重构完成（不是本次统一套路），
    使用前请先跑一遍预览 / 录像 / 截图，确认与旧版行为一致。
 3. **依赖未锁版本**：`requirements.md` 里没有写版本号，换机器或升级可能踩到 API 变化。
    当前开发环境实测为 mediapipe 1.0.1 + opencv 5.0.0，交付前建议锁定版本。
-4. **左右镜像约定**：交互类脚本对画面做了水平镜像（`cv2.flip`），让屏幕里的"左/右"与使用者的体感一致；
-   `camera_preview.py` 不做镜像，所以它录下来的视频是"对面看你"的视角，与截图视角相反。
-   如果实机上发现左右判断相反，按 `I` 反转。
+4. **左右镜像约定（YOLO 版升级为铁律）**：YOLO 推理只吃**未镜像帧**（镜像会把
+   "看左/看右"反转），镜像只用于显示层 —— `read_frame()` 里先 `analyze` 后 `flip` 的
+   顺序不能动。`camera_preview.py` 不做镜像，所以它录下来的视频是"对面看你"的视角，与截图视角相反。
+   如果实机上发现左右判断相反，按 `I` 反转（它会连同注视信号一起反转）。
 5. **窗口标题**：Windows 版 OpenCV 对中文窗口标题支持不好（会显示成乱码），
    所以五个脚本的窗口标题一律用英文；窗口内的中文状态文字由 PIL + 系统字体渲染，不受影响。
 6. **中文字体依赖**：三个需要显示中文的交互脚本按 `msyh.ttc → simhei.ttf → arial.ttf` 顺序探测系统字体，
@@ -238,6 +248,8 @@ Python 端的串口输出层也已落地：`src/hardware/serial_link.py`
    全过后加装物理急停按钮。
 5. **实机联调串口层**：插上 Arduino，把 `gaze_blink_confirm_demo.py` 顶部 `ENABLE_HARDWARE`
    改为 `True` 并填好串口号，验证心跳保活、`GET_DATA` 电池回报、低电强制停车三条链路。
+6. **实机验证 YOLO 链路**：眼动模型存在域差距（见已知问题 1），换机器先跑
+   `yolo_preview.py` 看裸输出，必要时用 Yolo_model 项目的新数据重新校准/训练。
 
 
 ## English Version
@@ -247,6 +259,8 @@ Eye-controlled wheelchair prototype — gaze + blink interaction. The Python sid
 
 Using an ordinary USB camera to recognize "which direction the eyes are looking" and "whether there is a blink," the goal is to first get the **eye-control interaction** path working.
 
+Gaze and blink detection now run on **YOLO26 models** (delivered by the Yolo_model project: `models/eye_yolo26n.pt` for open/closed eyes + `models/gaze5_yolo26s.pt` for 5-class gaze). MediaPipe was fully removed from the interaction pipeline on 2026-09-30 (that migration lives on the `chen` branch — see *Collaboration and Branches*).
+
 > ⚠️ **Safety boundary**: the Python side defaults to **pure screen simulation** (`ENABLE_HARDWARE = False` at the top of `gaze_blink_confirm_demo.py`) and sends no commands to any hardware. The Arduino firmware (`firmware/`) and the serial output layer (`src/hardware/`) are written but **not bench-verified and off by default**; no human ride testing before the bench checklist fully passes **and** a physical e-stop button is installed.
 
 ---
@@ -255,7 +269,7 @@ Using an ordinary USB camera to recognize "which direction the eyes are looking"
 
 The final goal is "gaze to select direction + blink as confirmation key," replacing the joystick:
 
-1. **Calibration (3 seconds)**: Keep your eyes open and look at the center of the screen; the program measures your own "open-eye baseline" and derives two decision lines (closed-eye line / open-eye line). Everyone's eye shape, glasses, and sitting distance are different, so the thresholds must be calibrated on-site by the user and cannot be hard-coded.
+1. **Calibration (3 seconds)**: Keep your eyes open and look at the center of the screen; the program measures your own "open-eye baseline" and derives two decision lines (closed-eye line / open-eye line). In the YOLO version this baseline is the **open-eye confidence** — model confidence drifts with camera and lighting, so on-site calibration is still required and cannot be hard-coded.
 2. **Select direction**: Move your gaze to the left / center / right of the screen (or left turn / forward / right turn). The same direction must remain stable for about 0.7 seconds before becoming a candidate.
 3. **Blink confirmation**: Only a natural blink (eyes closed for about 0.04–0.8 seconds) counts; too short is ignored as noise, too long (squinting, eyes closed resting) does not count. A 0.3-second refractory period is left between two counts to avoid a single blink being counted two or three times.
 
@@ -269,7 +283,8 @@ EyeWheelchairProject/
 │  ├─ camera/
 │  │  └─ camera_preview.py            Week 1: Camera baseline (preview / record / snapshot)
 │  ├─ vision/
-│  │  └─ landmarks_preview.py         Week 2: Face 478 points + hand 21 points visualization
+│  │  ├─ yolo_backend.py              YOLO eye backend: Haar localization + two-model inference + signal mapping
+│  │  └─ yolo_preview.py              Week 2 (YOLO): open/closed + 5-class gaze detection visualization
 │  └─ interaction/
 │     ├─ blink_preview.py             Step 3: Blink calibration and counting (refactored, with tests)
 │     ├─ gaze_direction_preview.py    Step 4: Gaze direction selection (left / center / right)
@@ -280,7 +295,7 @@ EyeWheelchairProject/
 ├─ firmware/
 │  └─ wheelchair_controller.ino       Revised Arduino firmware (with bench checklist, pending verification)
 ├─ Related_materials/                 Hardware photos, reference firmware (ardino_demo.ino), etc.
-├─ models/                            MediaPipe model files (face / hand landmarker, checked in)
+├─ models/                            YOLO26 eye weights (eye_yolo26n / gaze5_yolo26s, checked in)
 ├─ data/                              Recorded materials (raw_videos / snapshots)
 ├─ requirements.md                    Dependency list
 ├─ GIT_GUIDE.md                       Teammate Git onboarding guide (branch rules / daily loop / commit format)
@@ -324,10 +339,12 @@ Requires Python 3.10 or above (development environment is 3.13 / 3.14).
 
 ```bash
 python -m venv venv
-venv\Scripts\python.exe -m pip install opencv-python mediapipe numpy pillow pyserial pytest
+venv\Scripts\python.exe -m pip install opencv-python ultralytics numpy pillow pyserial pytest
 ```
 
 In Git Bash, write `venv\Scripts\python.exe` as `venv/Scripts/python.exe`; the same applies below.
+
+ultralytics automatically pulls in the CPU build of torch (~1 GB on Windows, one-time); **mediapipe is no longer needed**.
 
 ## Running
 
@@ -338,7 +355,7 @@ venv\Scripts\python.exe src\interaction\blink_preview.py
 | Script | Keys |
 |---|---|
 | `src/camera/camera_preview.py` | `Q` quit · `R` start/stop recording · `S` snapshot |
-| `src/vision/landmarks_preview.py` | `Q` quit · `S` save snapshot with landmarks |
+| `src/vision/yolo_preview.py` | `Q` quit · `S` save snapshot with detection boxes |
 | `src/interaction/blink_preview.py` | `Q` quit · `C` recalibrate |
 | `src/interaction/gaze_direction_preview.py` | `Q` quit · `C` recalibrate · `I` invert left/right |
 | `src/interaction/gaze_blink_confirm_demo.py` | `Q` quit · `C` recalibrate · `I` invert left/right |
@@ -354,7 +371,7 @@ Two prerequisites:
 venv\Scripts\python.exe -m pytest -q
 ```
 
-Runs in about 1 second, 29 tests in total: blink calibration / counting / too-short & too-long ignoring / refractory period / face-loss reset; serial-link intent translation / heartbeat / battery parsing / low-battery lock; UI rendering smoke tests; plus one smoke test that loads the real model. All use synthetic data and **need no camera or hardware**; the video test is automatically skipped when there is no usable recording in `data/raw_videos`.
+Runs in about 4 seconds, 35 cases in total (33 pass + 2 YOLO inference smoke tests that auto-skip when ultralytics or the weights are missing): blink calibration / counting / too-short & too-long ignoring / refractory period / face-loss reset; YOLO backend signal mapping, two-eye merging and blank-frame inference smoke; serial-link intent translation / heartbeat / battery parsing / low-battery lock; UI rendering smoke tests. All use synthetic data and **need no camera or hardware**.
 
 Habit when changing code: **run `pytest` once before and after each change**. It will directly tell you "whether this change broke existing behavior," without needing to open the camera and verify by eye.
 
@@ -408,21 +425,25 @@ actually go out to the firmware.
 | Stage | Content | Status |
 |---|---|---|
 | Week 1 | Camera baseline (preview / record / snapshot) | ⚠️ Refactored version awaits full on-device verification |
-| Week 2 | MediaPipe face and hand landmark visualization | ✅ Refactored (preliminary tests pass) |
+| Week 2 | Detection visualization (was MediaPipe keypoints → now YOLO detection boxes) | ✅ replaced by yolo_preview |
 | Step 3 | Blink calibration and counting (refactor + unit tests) | ✅ Verified on the real device |
 | Step 4 | Gaze direction selection (left / center / right) | ✅ Refactored (preliminary tests pass) |
 | Step 5 | Gaze selects direction + blink confirmation (screen demo) | ✅ Refactored (preliminary tests pass) |
 | Code tidy-up | Four scripts unified into the three-section layout with call-graph comments; decision logic unit-testable | ✅ |
 | Firmware | Safety-revised Arduino controller (watchdog / char buffer / stop-before-turn / PWM frequency), with bench checklist | 🔶 Written, awaiting bench verification |
 | Serial output layer | `src/hardware/serial_link.py` (heartbeat / battery polling / low-battery lock / simulated mode), 13 tests | 🔶 Written, awaiting on-device integration |
+| YOLO migration | MediaPipe fully replaced by YOLO26 eye models (eye_yolo26n + gaze5); state machines and tests kept | ✅ Done on the chen branch, awaiting on-device verification |
 | Next | Bench-verify the firmware → plug in the Arduino and integrate the serial layer | ⬜ Not started |
 
 ## Known Issues and Notes
 
-1. **Exit behaviour (handled in all five scripts)**: MediaPipe 1.0.1 takes about 42 seconds to destroy a recognizer on Windows (measured). The four MediaPipe-based scripts no longer call `close()`; instead the detector factory keeps a long-lived reference (keep-alive), so everything is reclaimed by the system at exit — pressing Q or clicking the window ✕ now ends the process **within 1 second**. `camera_preview.py` does not use MediaPipe and never had this problem.
+1. **YOLO domain gap (honest statement, measured in the Yolo_model project)**: the eye models score 95%+ in their training domain but degrade noticeably on other machines/cameras — the symptom is "no candidate, no blink counted", not an error.
+   Troubleshooting order: run `src/vision/yolo_preview.py` first to see the raw output (are boxes stable, labels correct), then tune `CONF_THRESHOLD` at the top of `src/vision/yolo_backend.py` (currently 0.30).
+   Also: eye localization switched from the MediaPipe keypoint boxes used in training to Haar cascade boxes, so the crop distribution differs slightly.
+   (The old "MediaPipe takes 42 s to exit" problem disappeared together with MediaPipe.)
 2. **`camera_preview.py` is not fully verified on the real machine**: it was refactored in a separate pass (not the unified pattern). Run preview / record / snapshot once before relying on it, and confirm the behaviour matches the old version.
 3. **Dependencies are not version-locked**: `requirements.md` lists no version numbers, so another machine or an upgrade may hit API changes. The development environment measures mediapipe 1.0.1 + opencv 5.0.0; lock the versions before delivery.
-4. **Left-right mirror convention**: interaction scripts mirror the image horizontally (`cv2.flip`) so that "left/right" on the screen matches the user's felt left/right; `camera_preview.py` does not mirror, so recorded video is from the "person facing you" perspective — the opposite of the snapshots. If left/right turns out reversed on the real device, press `I` to invert.
+4. **Left-right mirror convention (an iron rule in the YOLO version)**: YOLO inference only takes the **unmirrored frame** (mirroring flips "look left/right"); mirroring belongs to the display layer only — the analyze-then-flip order inside `read_frame()` must not be changed. `camera_preview.py` does not mirror, so recorded video is from the "person facing you" perspective — the opposite of the snapshots. If left/right turns out reversed on the real device, press `I` to invert (it flips the gaze signal together with the display).
 5. **Window title**: Windows OpenCV renders Chinese window titles badly (garbled text), so all five scripts use English titles; Chinese text inside the window is drawn by PIL + system fonts and is unaffected.
 6. **Chinese font dependency**: the three interaction scripts that display Chinese probe system fonts in the order `msyh.ttc → simhei.ttf → arial.ttf` and cache the loaded font (no more re-reading the file every frame); an error is raised only if none of the three exists. `camera_preview.py` and `landmarks_preview.py` use English only and do not depend on fonts.
 7. The 2026-09-16 recording files in `data/raw_videos/` are all 0-byte empty shells (the recording never wrote any data) and have been deleted from the repository.
@@ -442,3 +463,4 @@ These three are the current, real boundaries of the system and are "known, delib
 3. **Extract the common parts**: opening the camera, building detectors and drawing Chinese text are copied in all five scripts, so one change means five edits — the next duplication to remove.
 4. **Bench-verify `firmware/wheelchair_controller.ino`**: work through the 7-item checklist at the end of the file (wiring check → PWM noise/temperature → watchdog → long run → stop-before-turn → low-battery simulation → voltage cross-check); then add a physical e-stop button.
 5. **On-device integration of the serial layer**: plug in the Arduino, set `ENABLE_HARDWARE = True` with the right port in `gaze_blink_confirm_demo.py`, and verify the three chains — heartbeat keep-alive, `GET_DATA` battery replies, and forced stop on low battery.
+6. **Verify the YOLO pipeline on the real machine**: the eye models have a domain gap (see Known Issues 1). On a new machine run `yolo_preview.py` first to inspect the raw output, and re-calibrate / re-train with fresh data from the Yolo_model project if needed.

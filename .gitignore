@@ -5,7 +5,10 @@ __pycache__/
 # 数据与模型（视情况忽略）
 data/raw_videos/
 data/snapshots/
+data/compare_logs/     # 双引擎对比 CSV（数据文件，不入库）
 models/*.task
+# 例外：双引擎对比脚本需要 MediaPipe 478 点模型（不忽略）
+!models/face_landmarker.task
 
 # 硬件照片（体积大，不入库；硬件信息记录在 README 的"硬件与固件"一节）
 Related_materials/IMG_*.jpg

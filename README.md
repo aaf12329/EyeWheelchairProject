@@ -48,8 +48,8 @@ EyeWheelchairProject/
 │  │  ├─ yolo_backend.py              YOLO 眼动后端：YuNet 定位眼睛 + 双模型推理 + 信号换算
 │  │  └─ yolo_preview.py              第 2 周（YOLO 版）：睁/闭眼 + 5 类注视检测可视化
 │  └─ interaction/
-│     ├─ blink_preview.py             第 3 步：眨眼校准与计数（已重构，含测试）
-│     ├─ gaze_direction_preview.py    第 4 步：视线方向选择（左 / 中 / 右）
+│     ├─ blink_preview.py             第 3 步：眨眼校准与计数（YOLO×MediaPipe 双引擎，含测试）
+│     ├─ gaze_direction_preview.py    第 4 步：视线方向选择（左 / 中 / 右；双引擎）
 │     └─ gaze_blink_confirm_demo.py   第 5 步：视线选方向 + 眨眼确认（界面美化版，接串口层）
 │  └─ hardware/
 │     └─ serial_link.py               串口输出层：意图→指令、心跳、电池、低电锁（默认模拟）
@@ -138,8 +138,8 @@ venv\Scripts\python.exe src\interaction\blink_preview.py
 |---|---|
 | `src/camera/camera_preview.py` | `Q` 退出 · `R` 开始/停止录像 · `S` 截图 |
 | `src/vision/yolo_preview.py` | `Q` 退出 · `S` 保存带检测框的截图 |
-| `src/interaction/blink_preview.py` | `Q` 退出 · `C` 重新校准 |
-| `src/interaction/gaze_direction_preview.py` | `Q` 退出 · `C` 重新校准 · `I` 反转左右 |
+| `src/interaction/blink_preview.py` | `Q` 退出 · `C` 重新校准（两引擎一起）｜**双引擎**：YOLO×MediaPipe 同帧各判各的，逐帧数据写 `data/compare_logs/blink_compare_*.csv`（`--no-mp` 只跑 YOLO） |
+| `src/interaction/gaze_direction_preview.py` | `Q` 退出 · `C` 重新校准 · `I` 反转左右（都作用于两引擎）｜**双引擎**：逐帧数据写 `data/compare_logs/gaze_compare_*.csv`（`--no-mp` 只跑 YOLO） |
 | `src/interaction/gaze_blink_confirm_demo.py` | `Q` 退出 · `C` 重新校准 · `I` 反转左右 |
 
 两个使用前提：
@@ -312,8 +312,8 @@ EyeWheelchairProject/
 │  │  ├─ yolo_backend.py              YOLO eye backend: YuNet localization + two-model inference + signal mapping
 │  │  └─ yolo_preview.py              Week 2 (YOLO): open/closed + 5-class gaze detection visualization
 │  └─ interaction/
-│     ├─ blink_preview.py             Step 3: Blink calibration and counting (refactored, with tests)
-│     ├─ gaze_direction_preview.py    Step 4: Gaze direction selection (left / center / right)
+│     ├─ blink_preview.py             Step 3: Blink counting (YOLO×MediaPipe dual-engine, with tests)
+│     ├─ gaze_direction_preview.py    Step 4: Gaze direction (left/center/right; dual-engine)
 │     └─ gaze_blink_confirm_demo.py   Step 5: Gaze selects direction + blink confirmation (restyled UI, wired to the serial layer)
 │  └─ hardware/
 │     └─ serial_link.py               Serial output layer: intent→command, heartbeat, battery, low-battery lock (simulated by default)

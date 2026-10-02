@@ -8,6 +8,15 @@
 （models/eye_yolo26n.pt，睁/闭眼 2 类，由 Yolo_model 项目训练交付）：
   旧链路：MediaPipe 478 点 → EAR 开合比 → 阈值判定
   新链路：YuNet 定位眼睛 → 裁剪 → YOLO 判睁/闭 → 睁眼置信度当"开合值" → 原状态机
+
+**双引擎对比版（2026-10-02）**：同一帧同时跑两套引擎，逐帧数据写入 CSV 供对比参考：
+  引擎① YOLO：睁眼置信度当"开合值"（如上）
+  引擎② MediaPipe：478 点 → EAR 眼纵横比（无训练依赖的几何法，旧链路原样回归）
+两个 BlinkDetector 状态机**各自独立校准、各自计数**——同一段眨眼两边各记各的，
+CSV 逐帧并列（yolo_open / mp_ear / 各自状态与计数），跑完一眼看出两种引擎差多少。
+YOLO 单引擎行为完全保留：加 --no-mp 即回到纯 YOLO；
+CSV 落在 data/compare_logs/blink_compare_<时间戳>.csv（--no-log 可关）。
+
 BlinkDetector 状态机（校准/计数/不应期）一行没改，只是喂进来的信号换了来源；
 置信度是连续值，旧的三帧平滑与两条判定线照常工作。校准保留：它让阈值
 适配当前摄像头与光照（模型置信度会随场景漂移）。
@@ -29,35 +38,44 @@ BlinkDetector 状态机（校准/计数/不应期）一行没改，只是喂进�
   │   ├─ open_camera()  ←common层       打开摄像头，返回 cap（后面每帧从它 read）
   │   ├─ make_backend()                 建 YOLO 后端：加载 eye_yolo26n + gaze5 权重
   │   │    └─ vision.yolo_backend.YoloEyeGaze()   （YuNet 定位 + 双模型推理都在里面）
-  │   ├─ BlinkDetector(program_started_at)   建眨眼状态机，校准从此刻开始计时
-  │   │    └─ self.reset(now)           把所有状态置位（按 C 重新校准时走的也是它）
+  │   ├─ make_mp_backend()              建 MediaPipe 引擎（--no-mp 跳过；加载失败自动降级）
+  │   │    └─ vision.mediapipe_backend.MediaPipeEyeGaze()（478 点 → EAR）
+  │   ├─ BlinkDetector × 2              两个状态机：一个吃 YOLO 信号、一个吃 MediaPipe EAR
+  │   ├─ CsvLogger ←common层            双引擎逐帧数据 → data/compare_logs/（--no-log 跳过）
   │   └─ chinese_font(20) ←common层     预加载中文字体，缺字体时立刻报错
   │
   ├─ 每帧循环（下面的 ★ 每帧都执行；五步顺序 看→量→判→报→控）
-  │   ├─★ read_frame(cap, backend)
+  │   ├─★ read_frame(cap, backend, mp_backend, started)
   │   │    ├─ cap.read()                             取【原始帧】（不镜像！）
   │   │    ├─ backend.analyze(frame)                 ← YOLO 推理（未镜像帧，铁律）
+  │   │    ├─ mp_backend.analyze(frame, ts_ms)       ← MediaPipe 推理（同一帧）
   │   │    ├─ cv2.flip(frame, 1)                     只为显示做镜像
-  │   │    └─ 返回 (显示帧, now, EyeGazeResult)
+  │   │    └─ 返回 (显示帧, now, EyeGazeResult, MediaPipeResult 或 None)
   │   ├─★ draw_eye_boxes(显示帧, result, 宽)          画眼睛框（未镜像坐标经 flip_box 翻转）
-  │   ├─★ blink.update(now, result.open_conf)        ★核心判定（纯逻辑，与旧版一致）
+  │   ├─★ blink.update(now, result.open_conf)        ★YOLO 判定（纯逻辑，与旧版一致）
+  │   ├─★ blink_mp.update(now, mp_result.ear)        ★MediaPipe 判定（同款状态机、独立校准）
   │   │    ├─ _update_calibration()   校准未完成时走这里；3 秒后写入 baseline
   │   │    ├─ _update_counting()      校准完成后走这里；眨眼计数在这里 +1
   │   │    └─ _status(ear) → BlinkStatus   把本帧结果打包返回
-  │   ├─★ show_status(frame, status)                   把 status 显示到窗口
-  │   │    └─ draw_chinese_status(frame, 四行文字) → chinese_font(29 / 20)
+  │   ├─★ show_status(frame, status, mp_status[, mp_ear])   两栏结果画到窗口
+  │   │    └─ draw_chinese_status(frame, 四行或六行文字) → chinese_font(29 / 20)
+  │   ├─★ logger.log(逐帧一行)                         双引擎数据写 CSV（--no-log 跳过）
   │   ├─★ window_is_alive()                            问窗口还活着没（点 ✕ 后为假）
-  │   └─★ pressed_key(now, key_available_at)           读按键：q 退出；c → blink.reset()
+  │   └─★ pressed_key(now, key_available_at)           读按键：q 退出；c → 两个状态机一起 reset()
   │
   └─ finally（无论怎么退出都执行）
+      ├─ logger.close()                  收尾 CSV，打印路径与行数
       ├─ cap.release()                   交还摄像头
       └─ cv2.destroyAllWindows()         关窗口
 
 数据在这些函数之间是怎么流动的：
 
-  摄像头原始帧 ──backend.analyze──▶ open_conf（0~1，闭眼走低的连续信号）
-  open_conf + 当前时间 ──blink.update──▶ BlinkStatus（计数值 / 状态文字 / 基线 / 提示语）
-  BlinkStatus ──show_status──▶ 屏幕左上角的四行中文
+  摄像头原始帧 ──YOLO analyze──▶ open_conf（0~1，闭眼走低的连续信号）
+  摄像头原始帧 ──MP analyze────▶ ear（EAR，闭眼趋近 0 的连续信号）
+  open_conf + 当前时间 ──blink.update──▶ BlinkStatus（YOLO 侧：计数/状态/基线/提示）
+  ear       + 当前时间 ──blink_mp.update──▶ BlinkStatus（MP 侧：同上，完全独立）
+  两个 BlinkStatus ──show_status──▶ 屏幕左上角两栏中文（YOLO 栏 + MediaPipe 栏）
+  逐帧四个数 ──logger.log──▶ data/compare_logs/blink_compare_*.csv（事后核对）
 
 （旧版 MediaPipe 的 42 秒退出卡顿随关键点检测一起移除了：torch 模型进程可正常回收。）
 """
@@ -71,11 +89,14 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-# 本项目各脚本独立运行（没有包结构），把 src/ 加进搜索路径以引入 YOLO 后端
+# 本项目各脚本独立运行（没有包结构），把 src/ 加进搜索路径以引入 YOLO/MediaPipe 后端
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vision.yolo_backend import YoloEyeGaze, draw_eye_boxes  # noqa: E402  ← 在 sys.path 之后导入
+from vision.mediapipe_backend import MediaPipeEyeGaze  # noqa: E402  ← 第二引擎（双引擎对比）
 from common.camera_utils import open_camera  # noqa: E402  ← 共用层（src/common/）
+from common.csv_logger import CsvLogger  # noqa: E402
 from common.draw_utils import chinese_font  # noqa: E402
+from common.paths import COMPARE_LOG_DIR  # noqa: E402
 
 
 #默认参数设定：
@@ -108,7 +129,7 @@ WELCOME_ART = (
 )
 
 #path写法（里面全是路径）
-WINDOW_NAME = "Blink Detection (YOLO) | Q quit | C recalibrate | visual test only"
+WINDOW_NAME = "Blink Detection (YOLO×MediaPipe) | Q quit | C recalibrate | visual test only"
 
 
 # ============================ 1) 眨眼判定（纯逻辑） ============================
@@ -315,15 +336,30 @@ def make_backend() -> YoloEyeGaze:
     return YoloEyeGaze()
 
 
+def make_mp_backend():
+    """建 MediaPipe 引擎（第二引擎）；缺库/缺模型时打印原因并返回 None（自动降级）。
+
+    调用关系：被 main() 在启动时调用一次；返回值传给 read_frame()。
+    降级设计：只跑 YOLO 也能完成眨眼测试，所以这里不抛异常、只提示原因。
+    """
+    try:
+        return MediaPipeEyeGaze()
+    except (RuntimeError, FileNotFoundError) as exc:
+        print(f"⚠️ MediaPipe 引擎未启用：{exc}")
+        print("   → 本次只跑 YOLO 引擎（显式只要 YOLO 可加 --no-mp 去掉本提示）。")
+        return None
+
+
 
 
 
 
 def draw_chinese_status(frame, lines) -> object:
-    """用 Windows 中文字体绘制状态栏，避免 OpenCV 英文字体无法显示中文。
+    """用 Windows 中文字体绘制状态栏（YOLO 四行 + 可选 MediaPipe 附栏两行）。
 
     调用关系：被 show_status() 调用；内部调用 chinese_font() 取字体。
     注意它不修改传入的 frame，而是返回一张画好字的新图。
+    第 5/6 行（如传入）用青蓝色，与 YOLO 主栏区分。
     """
     image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(image)
@@ -333,44 +369,61 @@ def draw_chinese_status(frame, lines) -> object:
     draw.text((14, 39), lines[1], font=font_large, fill=(255, 255, 0))
     draw.text((14, 76), lines[2], font=font_small, fill=(255, 255, 255))
     draw.text((14, 103), lines[3], font=font_small, fill=(255, 210, 80))
+    for i, text in enumerate(lines[4:6]):     # 可选附栏：MediaPipe 两行
+        draw.text((14, 130 + i * 27), text, font=font_small, fill=(120, 200, 255))
     return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
 
 # ============================ 3) 主流程 ============================
 
 
-def read_frame(cap, backend: YoloEyeGaze):
-    """读一帧 → 【未镜像】送 YOLO → 翻转出显示帧，返回（显示帧, 当前时间, 推理结果）。
+def read_frame(cap, backend: YoloEyeGaze, mp_backend, started: float):
+    """读一帧 → 【未镜像】依次送 YOLO 与 MediaPipe → 翻转出显示帧。
 
-    调用关系：被 main() 每帧调用（循环的第一步）；
-    内部调用 cap.read()、backend.analyze()（真正干活的那次推理）和 cv2.flip。
-    顺序是铁律：先 analyze 后 flip —— 模型必须吃未镜像帧，镜像只属于显示层。
+    调用关系：被 main() 每帧调用（循环的第一步）；内部调用 cap.read()、
+    backend.analyze()、mp_backend.analyze()（mp_backend 为 None 时跳过）和 cv2.flip。
+    返回（显示帧, 当前时间, YOLO 结果, MediaPipe 结果 或 None）。
+    顺序是铁律：先 analyze 后 flip —— 两个引擎都必须吃未镜像帧，镜像只属于显示层。
     """
     ok, frame = cap.read()
     if not ok:
         raise RuntimeError("摄像头读取失败。")
     now = time.perf_counter()
-    result = backend.analyze(frame)          # ← 推理只吃未镜像帧
-    display = cv2.flip(frame, 1)             # ← 镜像只为显示（自拍视角）
-    return display, now, result
+    result = backend.analyze(frame)                       # ← YOLO 吃未镜像帧
+    mp_result = None
+    if mp_backend is not None:
+        ts_ms = int((now - started) * 1000)               # VIDEO 模式要毫秒时间戳
+        mp_result = mp_backend.analyze(frame, ts_ms)      # ← MediaPipe 吃同一帧
+    display = cv2.flip(frame, 1)                          # ← 镜像只为显示（自拍视角）
+    return display, now, result, mp_result
 
 
-def show_status(frame, status) -> None:
-    """铺黑色底板 + 四行中文状态 + 推到窗口显示。
+def show_status(frame, status, mp_status=None, mp_ear=None) -> None:
+    """铺黑色底板 + YOLO 四行（+ 可选 MediaPipe 两行）+ 推到窗口显示。
 
     调用关系：被 main() 每帧调用（循环第 4 步）；内部调用 draw_chinese_status()。
-    它只读 status（BlinkStatus），不改任何状态——所以调它不会影响判定。
+    它只读 status，不改任何状态——所以调它不会影响判定。
+    mp_status 为 None 时（--no-mp）只画 YOLO 部分，行为与单引擎版一致。
     """
-    cv2.rectangle(frame, (0, 0), (560, 125), (0, 0, 0), -1)
+    height = 130
+    mp_lines = []
+    if mp_status is not None:
+        ear_text = "--" if mp_ear is None else f"{mp_ear:.3f}"
+        mp_lines = [
+            f"【MediaPipe】EAR：{ear_text}｜眨眼次数：{mp_status.blink_count}｜状态：{mp_status.state}",
+            "两引擎各自独立校准与计数；逐帧数据见 data/compare_logs/ 的 CSV",
+        ]
+        height = 185
+    cv2.rectangle(frame, (0, 0), (640, height), (0, 0, 0), -1)
     ear_text = "--" if status.ear is None else f"{status.ear:.3f}"
     base_text = "--" if status.baseline is None else f"{status.baseline:.3f}"
     close_text = "--" if status.close_threshold is None else f"{status.close_threshold:.3f}"
     frame = draw_chinese_status(frame, [
-        f"睁眼置信度：{ear_text}｜睁眼基线：{base_text}｜闭眼线：{close_text}",
+        f"【YOLO】睁眼置信度：{ear_text}｜基线：{base_text}｜闭眼线：{close_text}",
         f"眨眼次数：{status.blink_count}｜状态：{status.state}",
         status.message,
-        "按 Q 退出｜按 C 重新校准｜仅视觉测试，不控制任何硬件",
-    ])
+        "按 Q 退出｜按 C 重新校准（两个引擎一起）｜仅视觉测试，不控制任何硬件",
+    ] + mp_lines)
     cv2.imshow(WINDOW_NAME, frame)
 
 
@@ -401,35 +454,68 @@ def pressed_key(now: float, key_available_at: float):
     return chr(raw_key & 0xFF).lower(), now + KEY_DEBOUNCE_SECONDS
 
 
+def parse_args():
+    """命令行参数：默认双引擎 + 写 CSV；--no-mp / --no-log 可分别关掉。"""
+    import argparse
+
+    ap = argparse.ArgumentParser(description="眨眼检测预览（YOLO × MediaPipe 双引擎对比）")
+    ap.add_argument("--camera", type=int, default=CAMERA_INDEX, help="摄像头编号")
+    ap.add_argument("--no-mp", action="store_true", help="只跑 YOLO 引擎（不加载 MediaPipe）")
+    ap.add_argument("--no-log", action="store_true", help="不写双引擎对比 CSV")
+    return ap.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
 
     for i in WELCOME_ART:
         print(i)
-    """程序入口：先建好四样东西，然后每帧走一遍 看→量→判→报→控。"""
+    """程序入口：先建好六样东西，然后每帧走一遍 看→量→判→报→控。"""
     # ==================== 启动阶段（下面每个调用只执行一次）====================
-    cap = open_camera(CAMERA_INDEX, WIDTH, HEIGHT)  # ① 打开摄像头
-    backend = make_backend()  # ② 建 YOLO 后端（加载 eye_yolo26n + gaze5 权重）
-    blink = BlinkDetector(time.perf_counter())  # ③ 建眨眼状态机；校准从此刻开始计时
-    key_available_at = 0.0  # 按键防抖：下次允许响应的时间点
-    chinese_font(20)  # ④ 提前加载字体，字体缺失时立刻报错
+    cap = open_camera(args.camera, WIDTH, HEIGHT)   # ① 打开摄像头
+    backend = make_backend()                        # ② 建 YOLO 后端
+    mp_backend = None if args.no_mp else make_mp_backend()  # ③ 建 MediaPipe 引擎（可降级）
+    started = time.perf_counter()
+    blink = BlinkDetector(started)                  # ④ 眨眼状态机（YOLO 信号）
+    blink_mp = BlinkDetector(started) if mp_backend else None  # ⑤ 眨眼状态机（MP EAR）
+    logger = None                                   # ⑥ 双引擎逐帧 CSV
+    if not args.no_log:
+        logger = CsvLogger(COMPARE_LOG_DIR, "blink_compare", [
+            "t_s", "frame", "yolo_open", "yolo_state", "yolo_blinks",
+            "mp_ear", "mp_state", "mp_blinks",
+        ])
+    key_available_at = 0.0
+    chinese_font(20)  # 提前加载字体，字体缺失时立刻报错
 
-    print("眨眼预览已启动（YOLO 版）：请先点一下视频窗口让它获得焦点，然后 Q 退出、C 重新校准。")
+    print("眨眼预览已启动（YOLO × MediaPipe 双引擎）：请先点一下视频窗口让它获得焦点，"
+          "然后 Q 退出、C 重新校准。")
+    if logger:
+        print(f"双引擎逐帧数据 → {logger.path}")
+    frame_i = 0
     try:
         # ================= 每帧循环：看 → 量 → 判 → 报 → 控 =================
         while True:
-            # ---- ① 看：取一帧，未镜像送 YOLO，拿回推理结果；再翻出显示帧 ----
-            frame, now, result = read_frame(cap, backend)
+            # ---- ① 看：取一帧，未镜像送两个引擎，拿回两份结果；再翻出显示帧 ----
+            frame, now, result, mp_result = read_frame(cap, backend, mp_backend, started)
             if result.face_found:
                 draw_eye_boxes(frame, result, WIDTH)  # 眼睛框（只为肉眼检查，不参与判定）
 
-            # ---- ② 量：睁眼置信度就是"开合值"（没检测到时是 None）----
-            ear_raw = result.open_conf
+            # ---- ② 量 + ③ 判：两个状态机各自独立校准、独立计数 ----
+            status = blink.update(now, result.open_conf)          # YOLO：睁眼置信度当开合值
+            mp_status = None
+            mp_ear = mp_result.ear if mp_result else None
+            if blink_mp is not None:
+                mp_status = blink_mp.update(now, mp_ear)          # MediaPipe：EAR 当开合值
 
-            # ---- ③ 判：校准 / 计数，全部判定逻辑都在 BlinkDetector 里 ----
-            status = blink.update(now, ear_raw)
-
-            # ---- ④ 报：把 status 画到窗口上 ----
-            show_status(frame, status)
+            # ---- ④ 报：两栏画到窗口；逐帧数据写 CSV ----
+            show_status(frame, status, mp_status, mp_ear)
+            frame_i += 1
+            if logger:
+                logger.log([round(now - started, 3), frame_i,
+                            result.open_conf, status.state, status.blink_count,
+                            mp_ear,
+                            mp_status.state if mp_status else None,
+                            mp_status.blink_count if mp_status else None])
 
             # ---- ⑤ 控：先看窗口还活着没，再读键盘 ----
             if not window_is_alive():  # 窗口被点 ✕ 关掉就退出
@@ -439,8 +525,13 @@ def main() -> None:
             if key == "q":
                 break
             if key == "c":
-                blink.reset(now, MESSAGE_RECALIBRATE)  # 回到校准起点，重新采集一次基线
+                blink.reset(now, MESSAGE_RECALIBRATE)             # 两个状态机一起重校准
+                if blink_mp is not None:
+                    blink_mp.reset(now, MESSAGE_RECALIBRATE)
     finally:
+        if logger:
+            logger.close()
+            print(f"对比数据已保存：{logger.path}（{logger.rows} 行）")
         cap.release()
         cv2.destroyAllWindows()
 

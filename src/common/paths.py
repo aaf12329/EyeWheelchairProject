@@ -15,6 +15,9 @@ GAZE_WEIGHTS = MODELS_DIR / "gaze_yolo26s.pt"        # 3 类主控：look_up/cen
 GAZE5_WEIGHTS = MODELS_DIR / "gaze5_yolo26s.pt"      # 5 类：含 look_left/right
 YUNET_WEIGHTS = MODELS_DIR / "face_detection_yunet_2023mar.onnx"  # 人脸定位
 
+# ---- MediaPipe 线（仅双引擎对比脚本用：blink_preview / gaze_direction_preview）----
+FACE_LANDMARKER = MODELS_DIR / "face_landmarker.task"  # 478 点人脸（含虹膜）
+
 # ---- 中文字体探测顺序（msyh 缺失时回退，换机器不会直接崩）----
 FONT_CANDIDATES = (
     Path(r"C:\Windows\Fonts\msyh.ttc"),
@@ -24,3 +27,4 @@ FONT_CANDIDATES = (
 
 # ---- 输出目录 ----
 SNAPSHOTS_DIR = PROJECT_ROOT / "runs" / "live_snapshots"
+COMPARE_LOG_DIR = PROJECT_ROOT / "data" / "compare_logs"  # 双引擎对比 CSV（数据文件，不入库）

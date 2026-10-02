@@ -9,6 +9,15 @@
 （models/gaze5_yolo26s.pt，5 类：上/中/下/左/右，由 Yolo_model 项目训练交付）：
   旧链路：MediaPipe 478 点 → 虹膜水平位置 score → 阈值判定
   新链路：YuNet 定位眼睛 → 裁剪 → YOLO 判 5 类 → 左0/中0.5/右1 当"score" → 原状态机
+
+**双引擎对比版（2026-10-02）**：同一帧同时跑两套引擎，逐帧数据写入 CSV 供对比参考：
+  引擎① YOLO：5 类分类 → 左0/中0.5/右1 信号（如上）
+  引擎② MediaPipe：478 点 → 虹膜水平位置（已做镜像修正，语义与①一致：左0/中0.5/右1）
+两个 GazeDirectionDetector 状态机**各自独立校准、各自出候选**——同一段视线移动
+两边各判各的，CSV 逐帧并列（yolo_score / mp_score / 各自方向与候选），跑完对比。
+YOLO 单引擎行为完全保留：加 --no-mp 即回到纯 YOLO；
+CSV 落在 data/compare_logs/gaze_compare_<时间戳>.csv（--no-log 可关）。
+
 GazeDirectionDetector 状态机（校准/稳定停留/候选）逻辑没变，只是信号来源换了；
 校准保留：它吸收分类器在当前摄像头下的偏置（比如你正视时模型总偏一点）。
 
@@ -28,28 +37,33 @@ GazeDirectionDetector 状态机（校准/稳定停留/候选）逻辑没变，�
   ├─ 启动阶段（每个只执行一次）
   │   ├─ open_camera()  ←common层       打开摄像头，返回 cap（后面每帧从它 read）
   │   ├─ make_backend()                 建 YOLO 后端：加载 eye + gaze5 权重
-  │   ├─ GazeDirectionDetector(started) 建状态机；校准从此刻开始计时
-  │   │    └─ self.reset(now)           把所有状态置位（按 C 重新校准走的也是它）
+  │   ├─ make_mp_backend()              建 MediaPipe 引擎（--no-mp 跳过；加载失败自动降级）
+  │   ├─ GazeDirectionDetector × 2      两个状态机：一个吃 YOLO 信号、一个吃 MP 虹膜信号
+  │   ├─ CsvLogger ←common层            双引擎逐帧数据 → data/compare_logs/（--no-log 跳过）
   │   └─ chinese_font(20) ←common层     预加载中文字体，缺字体时立刻报错
   │
   ├─ 每帧循环（★ 每帧都执行；顺序 看 → 判 → 报 → 控）
-  │   ├─★ read_frame(cap, backend)
+  │   ├─★ read_frame(cap, backend, mp_backend, started)
   │   │    ├─ cap.read()                             取【原始帧】（不镜像！）
   │   │    ├─ backend.analyze(frame)                 ← YOLO 推理（未镜像帧，铁律）
+  │   │    ├─ mp_backend.analyze(frame, ts_ms)       ← MediaPipe 推理（同一帧）
   │   │    ├─ cv2.flip(frame, 1)                     只为显示做镜像
-  │   │    └─ 返回 (显示帧, now, EyeGazeResult)
+  │   │    └─ 返回 (显示帧, now, EyeGazeResult, MediaPipeResult 或 None)
   │   ├─★ draw_eye_boxes(显示帧, result, 宽)          画眼睛框 + 注视类别（只为肉眼检查）
-  │   ├─★ flow.update(now, result.gaze_score)        ★核心判定（纯逻辑，可单测）
+  │   ├─★ flow.update(now, result.gaze_score)        ★YOLO 判定（纯逻辑，可单测）
+  │   ├─★ flow_mp.update(now, mp.gaze_score)         ★MediaPipe 判定（同款状态机，独立校准）
   │   │    ├─ _update_calibration()           校准中走这里；3 秒后算出正视基准 center
   │   │    ├─ _update_selection()             校准后走这里；偏移量决定 左/中/右，稳定后出候选
   │   │    └─ _status(...) → GazeStatus       把本帧结果打包返回
-  │   ├─★ show_status(frame, status)          黑底 + 三行文字 + 三张卡片 + 推给窗口
-  │   │    ├─ draw_text(frame, ...)           三行中文 → chinese_font(20 / 28 / 18)
-  │   │    └─ draw_cards(frame, 候选)          左 / 中 / 右 三张卡片 → draw_text()
+  │   ├─★ show_status(frame, status, mp_status)  黑底 + YOLO 三行 + MP 一行 + 三张卡片
+  │   │    ├─ draw_text(frame, ...)           中文 → chinese_font(20 / 28 / 18)
+  │   │    └─ draw_cards(frame, 候选)          左 / 中 / 右 三张卡片（跟 YOLO 侧候选高亮）
+  │   ├─★ logger.log(逐帧一行)                        双引擎数据写 CSV（--no-log 跳过）
   │   ├─★ window_is_alive()                   问窗口还活着没（点 ✕ 后为假）
-  │   └─★ pressed_key(now, key_available_at)  读按键：q 退出 / c → reset / i → 反转
+  │   └─★ pressed_key(now, key_available_at)  读按键：q 退出 / c → 两个状态机一起 reset / i → 双双反转
   │
   └─ finally（无论怎么退出都执行）
+      ├─ logger.close()                 收尾 CSV，打印路径与行数
       ├─ cap.release()                  交还摄像头
       └─ cv2.destroyAllWindows()        关窗口
 
@@ -73,11 +87,14 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-# 本项目各脚本独立运行（没有包结构），把 src/ 加进搜索路径以引入 YOLO 后端
+# 本项目各脚本独立运行（没有包结构），把 src/ 加进搜索路径以引入 YOLO/MediaPipe 后端
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vision.yolo_backend import YoloEyeGaze, draw_eye_boxes  # noqa: E402  ← 在 sys.path 之后导入
+from vision.mediapipe_backend import MediaPipeEyeGaze  # noqa: E402  ← 第二引擎（双引擎对比）
 from common.camera_utils import open_camera  # noqa: E402  ← 共用层（src/common/）
+from common.csv_logger import CsvLogger  # noqa: E402
 from common.draw_utils import chinese_font, draw_text  # noqa: E402
+from common.paths import COMPARE_LOG_DIR  # noqa: E402
 
 # ---- 运行参数 ----
 CAMERA_INDEX = 0
@@ -93,7 +110,7 @@ MESSAGE_INITIAL = "请看屏幕正中间，正在校准"
 MESSAGE_RECALIBRATE = "重新校准：请看屏幕正中间"
 
 # ---- 路径与窗口 ----
-WINDOW_NAME = "Gaze Direction (YOLO) | Q quit | C recalibrate | I invert | visual test only"
+WINDOW_NAME = "Gaze Direction (YOLO×MediaPipe) | Q quit | C recalibrate | I invert | visual test only"
 
 
 # ============================ 1) 判定逻辑（纯逻辑） ============================
@@ -251,6 +268,20 @@ def make_backend() -> YoloEyeGaze:
     return YoloEyeGaze()
 
 
+def make_mp_backend():
+    """建 MediaPipe 引擎（第二引擎）；缺库/缺模型时打印原因并返回 None（自动降级）。
+
+    调用关系：被 main() 在启动时调用一次；返回值传给 read_frame()。
+    降级设计：只跑 YOLO 也能完成方向测试，所以这里不抛异常、只提示原因。
+    """
+    try:
+        return MediaPipeEyeGaze()
+    except (RuntimeError, FileNotFoundError) as exc:
+        print(f"⚠️ MediaPipe 引擎未启用：{exc}")
+        print("   → 本次只跑 YOLO 引擎（显式只要 YOLO 可加 --no-mp 去掉本提示）。")
+        return None
+
+
 
 
 
@@ -275,34 +306,47 @@ def draw_cards(frame, candidate: str):
 # ============================ 3) 主流程 ============================
 
 
-def read_frame(cap, backend: YoloEyeGaze):
-    """读一帧 → 【未镜像】送 YOLO → 翻转出显示帧，返回（显示帧, 当前时间, 推理结果）。
+def read_frame(cap, backend: YoloEyeGaze, mp_backend, started: float):
+    """读一帧 → 【未镜像】依次送 YOLO 与 MediaPipe → 翻转出显示帧。
 
     调用关系：被 main() 每帧调用（循环第一步）；内部调用 cap.read()、
-    backend.analyze()（真正推理的那次）和 cv2.flip。
-    顺序是铁律：先 analyze 后 flip —— 模型必须吃未镜像帧，镜像只属于显示层。
+    backend.analyze()、mp_backend.analyze()（mp_backend 为 None 时跳过）和 cv2.flip。
+    返回（显示帧, 当前时间, YOLO 结果, MediaPipe 结果 或 None）。
+    顺序是铁律：先 analyze 后 flip —— 两个引擎都必须吃未镜像帧，镜像只属于显示层。
     """
     ok, frame = cap.read()
     if not ok:
         raise RuntimeError("摄像头读取失败。")
     now = time.perf_counter()
-    result = backend.analyze(frame)          # ← 推理只吃未镜像帧
-    display = cv2.flip(frame, 1)             # ← 镜像只为显示（自拍视角）
-    return display, now, result
+    result = backend.analyze(frame)                       # ← YOLO 吃未镜像帧
+    mp_result = None
+    if mp_backend is not None:
+        ts_ms = int((now - started) * 1000)               # VIDEO 模式要毫秒时间戳
+        mp_result = mp_backend.analyze(frame, ts_ms)      # ← MediaPipe 吃同一帧
+    display = cv2.flip(frame, 1)                          # ← 镜像只为显示（自拍视角）
+    return display, now, result, mp_result
 
 
-def show_status(frame, status) -> None:
-    """铺黑色底板 + 三行中文 + 底部三张卡片，然后推给窗口。
+def show_status(frame, status, mp_status=None) -> None:
+    """铺黑色底板 + YOLO 三行 + 可选 MediaPipe 一行 + 底部三张卡片，推给窗口。
 
     调用关系：被 main() 每帧调用（循环第三步）；内部调用 draw_text() 和 draw_cards()。
     它只读 status，不改任何状态——所以调它不会影响判定。
+    卡片跟 YOLO 侧的候选高亮；mp_status 为 None 时（--no-mp）只画 YOLO 部分。
     """
-    cv2.rectangle(frame, (0, 0), (650, 105), (0, 0, 0), -1)
+    height = 105 + (28 if mp_status is not None else 0)
+    cv2.rectangle(frame, (0, 0), (700, height), (0, 0, 0), -1)
     score_text = "--" if status.score is None else f"{status.score:.3f}"
     base_text = "--" if status.center is None else f"{status.center:.3f}"
-    frame = draw_text(frame, f"注视信号：{score_text}｜正视基准：{base_text}", (14, 10), 20, (0, 255, 0))
+    frame = draw_text(frame, f"【YOLO】注视信号：{score_text}｜正视基准：{base_text}", (14, 10), 20, (0, 255, 0))
     frame = draw_text(frame, f"当前方向：{status.raw_direction}｜稳定候选：{status.candidate}", (14, 38), 28, (255, 255, 0))
     frame = draw_text(frame, status.message, (14, 74), 18, (255, 255, 255))
+    if mp_status is not None:
+        mp_score = "--" if mp_status.score is None else f"{mp_status.score:.3f}"
+        frame = draw_text(
+            frame,
+            f"【MediaPipe】信号：{mp_score}｜方向：{mp_status.raw_direction}｜候选：{mp_status.candidate}",
+            (14, 100), 18, (120, 200, 255))
     frame = draw_cards(frame, status.candidate)
     cv2.imshow(WINDOW_NAME, frame)
 
@@ -332,29 +376,68 @@ def pressed_key(now: float, key_available_at: float):
     return chr(raw_key & 0xFF).lower(), now + KEY_DEBOUNCE_SECONDS
 
 
-def main() -> None:
-    """程序入口：建好摄像头和 YOLO 后端后，每帧走一遍 看→判→报→控。"""
-    # ==================== 启动阶段（下面每个调用只执行一次）====================
-    cap = open_camera(CAMERA_INDEX, WIDTH, HEIGHT)                          # ① 打开摄像头
-    backend = make_backend()                     # ② 建 YOLO 后端
-    flow = GazeDirectionDetector(time.perf_counter())  # ③ 建状态机；校准从此刻开始计时
-    key_available_at = 0.0                       # 按键防抖：下次允许响应的时间点
-    chinese_font(20)                             # ④ 提前加载字体，字体缺失时立刻报错
+def parse_args():
+    """命令行参数：默认双引擎 + 写 CSV；--no-mp / --no-log 可分别关掉。"""
+    import argparse
 
-    print("视线方向预览已启动（YOLO 版）：请先点一下视频窗口让它获得焦点，然后 Q 退出、C 重新校准、I 反转左右。")
+    ap = argparse.ArgumentParser(description="视线方向预览（YOLO × MediaPipe 双引擎对比）")
+    ap.add_argument("--camera", type=int, default=CAMERA_INDEX, help="摄像头编号")
+    ap.add_argument("--no-mp", action="store_true", help="只跑 YOLO 引擎（不加载 MediaPipe）")
+    ap.add_argument("--no-log", action="store_true", help="不写双引擎对比 CSV")
+    return ap.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    """程序入口：建好摄像头和两个引擎后，每帧走一遍 看→判→报→控。"""
+    # ==================== 启动阶段（下面每个调用只执行一次）====================
+    cap = open_camera(args.camera, WIDTH, HEIGHT)   # ① 打开摄像头
+    backend = make_backend()                        # ② 建 YOLO 后端
+    mp_backend = None if args.no_mp else make_mp_backend()  # ③ 建 MediaPipe 引擎（可降级）
+    started = time.perf_counter()
+    flow = GazeDirectionDetector(started)           # ④ 方向状态机（YOLO 信号）
+    flow_mp = GazeDirectionDetector(started) if mp_backend else None  # ⑤（MP 虹膜信号）
+    logger = None                                   # ⑥ 双引擎逐帧 CSV
+    if not args.no_log:
+        logger = CsvLogger(COMPARE_LOG_DIR, "gaze_compare", [
+            "t_s", "frame", "yolo_score", "yolo_dir", "yolo_candidate", "yolo_center",
+            "mp_score", "mp_dir", "mp_candidate", "mp_center",
+        ])
+    key_available_at = 0.0
+    chinese_font(20)                                # 提前加载字体，字体缺失时立刻报错
+
+    print("视线方向预览已启动（YOLO × MediaPipe 双引擎）：请先点一下视频窗口让它获得焦点，"
+          "然后 Q 退出、C 重新校准、I 反转左右。")
+    if logger:
+        print(f"双引擎逐帧数据 → {logger.path}")
+    frame_i = 0
     try:
         # ================= 每帧循环：看 → 判 → 报 → 控 =================
         while True:
-            # ---- ① 看：取一帧，未镜像送 YOLO，拿回推理结果；再翻出显示帧 ----
-            frame, now, result = read_frame(cap, backend)
+            # ---- ① 看：取一帧，未镜像送两个引擎，拿回两份结果；再翻出显示帧 ----
+            frame, now, result, mp_result = read_frame(cap, backend, mp_backend, started)
             if result.face_found:
                 draw_eye_boxes(frame, result, WIDTH)  # 眼睛框（只为肉眼检查，不参与判定）
 
-            # ---- ② 判：校准 / 方向选择，全在 GazeDirectionDetector 里 ----
-            status = flow.update(now, result.gaze_score)
+            # ---- ② 判：两个状态机各自独立校准、各自出候选 ----
+            status = flow.update(now, result.gaze_score)              # YOLO：5 类信号
+            mp_status = None
+            if flow_mp is not None:
+                mp_score = mp_result.gaze_score if mp_result else None
+                mp_status = flow_mp.update(now, mp_score)             # MP：虹膜位置信号
 
-            # ---- ③ 报：三行中文 + 三张卡片，推给窗口 ----
-            show_status(frame, status)
+            # ---- ③ 报：两栏画到窗口；逐帧数据写 CSV ----
+            show_status(frame, status, mp_status)
+            frame_i += 1
+            if logger:
+                logger.log([round(now - started, 3), frame_i,
+                            result.gaze_score, status.raw_direction, status.candidate,
+                            None if status.center is None else round(status.center, 4),
+                            None if mp_result is None else mp_result.gaze_score,
+                            mp_status.raw_direction if mp_status else None,
+                            mp_status.candidate if mp_status else None,
+                            None if (mp_status is None or mp_status.center is None)
+                            else round(mp_status.center, 4)])
 
             # ---- ④ 控：先看窗口还活着没，再读键盘 ----
             if not window_is_alive():            # 窗口被点 ✕ 关掉就退出
@@ -364,10 +447,17 @@ def main() -> None:
             if key == "q":
                 break
             if key == "c":
-                flow.reset(now, MESSAGE_RECALIBRATE)  # 回到校准起点
+                flow.reset(now, MESSAGE_RECALIBRATE)      # 两个状态机一起重校准
+                if flow_mp is not None:
+                    flow_mp.reset(now, MESSAGE_RECALIBRATE)
             if key == "i":
-                flow.toggle_invert()                   # 左右方向反转 / 恢复
+                flow.toggle_invert()                      # 左右方向反转 / 恢复（两边一起）
+                if flow_mp is not None:
+                    flow_mp.toggle_invert()
     finally:
+        if logger:
+            logger.close()
+            print(f"对比数据已保存：{logger.path}（{logger.rows} 行）")
         cap.release()
         cv2.destroyAllWindows()
 

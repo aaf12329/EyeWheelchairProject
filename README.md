@@ -46,7 +46,7 @@ EyeWheelchairProject/
 │     └─ serial_link.py               串口输出层：意图→指令、心跳、电池、低电锁（默认模拟）
 ├─ tests/                             pytest：眨眼判定 / 串口链路 / 界面渲染 + 模型冒烟测试
 ├─ firmware/
-│  └─ wheelchair_controller.ino       Arduino 修订版固件（含台架验证清单，待实机验证）
+│  └─ wheelchair_controller/       Arduino 修订版固件（含台架验证清单，待实机验证）
 ├─ Related_materials/                 硬件照片、参考固件（ardino_demo.ino）等资料
 ├─ models/                            MediaPipe 模型文件（face / hand landmarker，已入库）
 ├─ data/                              录制素材（raw_videos / snapshots）
@@ -169,7 +169,7 @@ PC（Python + pyserial，9600 波特）──串口指令──▶ ATmega328P �
 固件文件两个：
 
 - `Related_materials/ardino_demo.ino` —— **参考件**，原样保留；
-- `firmware/wheelchair_controller.ino` —— **修订版**：看门狗、串口 char 缓冲、转向先停、
+- `firmware/wheelchair_controller/wheelchair_controller.ino` —— **修订版**：看门狗、串口 char 缓冲、转向先停、
   PWM 频率修正（约 18kHz）、电池平均+迟滞、低电限流等，每处改动带【修订】标记，
   文件底部有 **7 条台架验证清单**（接线核对、噪音/温度、看门狗、长跑、转向先停、低电模拟、电压对表）。
 
@@ -235,7 +235,7 @@ Python 端的串口输出层也已落地：`src/hardware/serial_link.py`
    → **已在 `chen` 分支完成（2026-09-29）**：新增 `src/common/` 共用层（`paths.py` 路径地址簿 +
    `camera_utils.open_camera()` + `draw_utils.chinese_font/draw_text()`），5 个脚本去重、净减 143 行；
    **合并 chen 后 main 一并获得**（main 自身尚未引入）。
-4. **台架验证 `firmware/wheelchair_controller.ino`**：按文件底部 7 条清单逐项过
+4. **台架验证 `firmware/wheelchair_controller/wheelchair_controller.ino`**：按文件底部 7 条清单逐项过
    （接线核对 → PWM 噪音/温度 → 看门狗 → 长跑 → 转向先停 → 低电模拟 → 电压对表），
    全过后加装物理急停按钮。
 5. **实机联调串口层**：插上 Arduino，把 `gaze_blink_confirm_demo.py` 顶部 `ENABLE_HARDWARE`
@@ -280,7 +280,7 @@ EyeWheelchairProject/
 │     └─ serial_link.py               Serial output layer: intent→command, heartbeat, battery, low-battery lock (simulated by default)
 ├─ tests/                             pytest: blink logic / serial link / UI rendering + model smoke test
 ├─ firmware/
-│  └─ wheelchair_controller.ino       Revised Arduino firmware (with bench checklist, pending verification)
+│  └─ wheelchair_controller/       Revised Arduino firmware (with bench checklist, pending verification)
 ├─ Related_materials/                 Hardware photos, reference firmware (ardino_demo.ino), etc.
 ├─ models/                            MediaPipe model files (face / hand landmarker, checked in)
 ├─ data/                              Recorded materials (raw_videos / snapshots)
@@ -393,7 +393,7 @@ The firmware has four built-in safety layers: **auto-stop after 3 s without a co
 Two firmware files:
 
 - `Related_materials/ardino_demo.ino` — **reference copy**, kept untouched;
-- `firmware/wheelchair_controller.ino` — **revised version**: watchdog, serial char buffer, stop-before-turn, PWM frequency fix (~18 kHz), battery averaging + hysteresis, throttled low-battery warnings, etc. Every change carries a 【修订】 marker, and the file ends with a **7-item bench verification checklist** (wiring check, noise/temperature, watchdog, long run, stop-before-turn, low-battery simulation, voltage cross-check).
+- `firmware/wheelchair_controller/wheelchair_controller.ino` — **revised version**: watchdog, serial char buffer, stop-before-turn, PWM frequency fix (~18 kHz), battery averaging + hysteresis, throttled low-battery warnings, etc. Every change carries a 【修订】 marker, and the file ends with a **7-item bench verification checklist** (wiring check, noise/temperature, watchdog, long run, stop-before-turn, low-battery simulation, voltage cross-check).
 
 The Python serial output layer is also in place: `src/hardware/serial_link.py`
 (the `WheelchairLink` class: intent → protocol letters, 1 s heartbeat re-send of the current
@@ -443,5 +443,5 @@ These three are the current, real boundaries of the system and are "known, delib
 2. **Add permanent tests**: `tests/` now covers step 3 (blink), the serial layer and UI rendering; the step 4 (gaze direction) behaviour checks are still one-off scripts and could be turned into permanent cases like `test_serial_link.py`.
 3. **Extract the common parts**: opening the camera, building detectors and drawing Chinese text are copied in all five scripts, so one change means five edits.
    → **Done on the `chen` branch (2026-09-29)**: new `src/common/` shared layer (`paths.py` registry + `camera_utils.open_camera()` + `draw_utils.chinese_font/draw_text()`); five scripts deduplicated, -143 lines. **Merging `chen` brings it into `main`** (main itself does not have it yet).
-4. **Bench-verify `firmware/wheelchair_controller.ino`**: work through the 7-item checklist at the end of the file (wiring check → PWM noise/temperature → watchdog → long run → stop-before-turn → low-battery simulation → voltage cross-check); then add a physical e-stop button.
+4. **Bench-verify `firmware/wheelchair_controller/wheelchair_controller.ino`**: work through the 7-item checklist at the end of the file (wiring check → PWM noise/temperature → watchdog → long run → stop-before-turn → low-battery simulation → voltage cross-check); then add a physical e-stop button.
 5. **On-device integration of the serial layer**: plug in the Arduino, set `ENABLE_HARDWARE = True` with the right port in `gaze_blink_confirm_demo.py`, and verify the three chains — heartbeat keep-alive, `GET_DATA` battery replies, and forced stop on low battery.

@@ -350,7 +350,8 @@ void sendSensorData() {
 }
 
 // ========== 命令处理函数 ==========
-void processCommand(String cmd) {
+void processCommand(String cmd) 
+{
   // 低电量时只允许停止命令
   if (isBatteryLow && cmd != "S" && cmd != "0") {
     Serial.println("Low battery, only stop command allowed");
